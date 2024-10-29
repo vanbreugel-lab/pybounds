@@ -94,7 +94,10 @@ class LatexStates:
                      'gdot': r'$\dot{g}$',
                      'v_para_dot': r'$\dot{v_{\parallel}}$',
                      'v_perp_dot': r'$\dot{v_{\perp}}$',
-                     'v_para_dot_ratio': r'$\frac{\Delta v_{\parallel}}{v_{\parallel}}$'
+                     'v_para_dot_ratio': r'$\frac{\Delta v_{\parallel}}{v_{\parallel}}$',
+                     'sigma': r'$\sigma$',
+                     'rho': r'$\rho$',
+                     'beta': r'$\beta$'
                      }
 
         if dict is not None:

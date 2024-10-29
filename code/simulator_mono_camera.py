@@ -52,8 +52,8 @@ class MonoCamera:
         self.calculate_simulation_data()
 
         # Set output mode
-        self.p = 2
-        self.output_mode = ['x', 'v']  # default output mode is [position, velocity]
+        self.output_mode = ('x', 'v', 'z', 'm', 'b', 'k')  # default output mode
+        self.p = len(self.output_mode)
         self.set_output_mode(output_mode)
 
         # Initialize outputs
