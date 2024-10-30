@@ -41,7 +41,7 @@ class EmpiricalObservabilityMatrix:
         self.y_nominal = self.simulator.simulate(self.x0, self.u_sim)
         self.x_nominal = self.simulator.x.copy()
         self.u_nominal = self.simulator.u.copy()
-        self.sim_data_nominal = self.simulator.sim_data.copy()
+        # self.sim_data_nominal = self.simulator.sim_data.copy()
 
         # Perturbation amounts
         self.w = len(t_sim)  # of points in time window
@@ -173,7 +173,7 @@ class SlidingEmpiricalObservabilityMatrix:
         self.n_point = len(self.O_index)  # # of times to calculate O
 
         # Where to store sliding window trajectory data & O's
-        self.window_data = {'t': [], 'u': [], 'x': [], 'y': [], 'y_plus': [], 'y_minus': [], 'sim_data': []}
+        self.window_data = {'t': [], 'u': [], 'x': [], 'y': [], 'y_plus': [], 'y_minus': []}
         self.O_sliding = []
         self.O_df_sliding = []
 
@@ -189,7 +189,7 @@ class SlidingEmpiricalObservabilityMatrix:
             self.parallel = parallel
 
         # Where to store sliding window trajectory data & O's
-        self.window_data = {'t': [], 'u': [], 'x': [], 'y': [], 'y_plus': [], 'y_minus': [], 'sim_data': []}
+        self.window_data = {'t': [], 'u': [], 'x': [], 'y': [], 'y_plus': [], 'y_minus': []}
         self.O_sliding = []
         self.O_df_sliding = []
 
@@ -241,8 +241,7 @@ class SlidingEmpiricalObservabilityMatrix:
                        'x': EOM.x_nominal.copy(),
                        'y': EOM.y_nominal.copy(),
                        'y_plus': EOM.y_plus.copy(),
-                       'y_minus': EOM.y_minus.copy(),
-                       'sim_data': EOM.sim_data_nominal.copy()}
+                       'y_minus': EOM.y_minus.copy()}
 
         return O_sliding, O_df_sliding, window_data
 

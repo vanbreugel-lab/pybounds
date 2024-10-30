@@ -241,7 +241,7 @@ class MonoCamera:
         :params run_mpc: boolean to run MPC controller
         """
 
-        # Update the initial state.
+        # Update the initial state
         self.set_initial_state(x0=x0.copy())
 
         # Set the output mode
