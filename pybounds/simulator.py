@@ -163,7 +163,7 @@ class Simulator(object):
         if not np.all(points_check):
             raise Exception('inputs are not the same size')
 
-    def simulate(self, x0=None, u=None):
+    def simulate(self, x0=None, u=None, return_full_output=False):
         """
         Simulate the system.
 
@@ -230,6 +230,13 @@ class Simulator(object):
 
         # Return the outputs in array format
         y_array = np.vstack(list(self.y.values())).T
-        return y_array
+
+        if return_full_output:
+            return self.time.copy(), self.x.copy(), self.u.copy(), self.u.copy()
+        else:
+            return y_array
+
+    def get_time_states_input_measurements(self):
+        return self.time.copy(), self.x.copy(), self.u.copy(), self.u.copy()
 
 

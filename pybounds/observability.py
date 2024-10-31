@@ -9,6 +9,7 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import sympy as sp
 from util import LatexStates
 
+
 class EmpiricalObservabilityMatrix:
     def __init__(self, simulator, x0, t_sim, u_sim, eps=1e-5, parallel=False):
         """ Construct an empirical observability matrix O.
@@ -344,6 +345,84 @@ class FisherObservability:
             self.R_inv = np.linalg.inv(self.R.values)
 
         self.R_inv = pd.DataFrame(self.R_inv, index=self.R.index, columns=self.R.index)
+
+
+class SlidingFisherObservability:
+    def __init__(self, O_list, time=None, sigma=1e6, R=None, sensor_noise_dict=None,
+                 states=None, sensors=None, time_steps=None, w=None):
+
+        """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
+        :param O_list: list of observability matrices O
+        :param time: time vector the same size as O_list
+        :param states: list of states to use from O's
+        :param sensors: list of sensors to use from O's
+        :param time_steps: list of time steps to use from O's
+        """
+
+        self.O_list = O_list
+        self.n_window = len(O_list)
+
+        # Set time & time-step
+        if time is None:
+            self.time = np.arange(0, self.n_window, step=1)
+        else:
+            self.time = time
+
+        self.dt = np.mean(np.diff(self.time))
+
+        # Get single O
+        O = O_list[0]
+
+        # Set window size
+        if w is None:  # set automatically
+            self.w = np.max(np.array(O.index.get_level_values('time_step'))) + 1
+        else:
+            self.w = w
+
+        # Set the states to use
+        if states is None:
+            self.states = O.columns
+        else:
+            self.states = states
+
+        # Set the sensors to use
+        if sensors is None:
+            self.sensors = O.index.get_level_values('sensor')
+        else:
+            self.sensors = sensors
+
+        # Set the time-steps to use
+        if time_steps is None:
+            self.time_steps = O.index.get_level_values('time_step')
+        else:
+            self.time_steps = time_steps
+
+        # Compute Fisher information matrix & inverse for each sliding window
+        self.EV = []  # collect error variance data for each state over time
+        self.FO = []
+        self.shift_index = int(np.round((1 / 2) * self.w))
+        self.shift_time = self.shift_index * self.dt  # shift the time forward by half the window size
+        for k in range(self.n_window):  # each window
+            # Get full O
+            O = self.O_list[k]
+
+            # Get subset of O
+            O_subset = O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
+
+            # Compute Fisher information & inverse
+            FO = FisherObservability(O_subset, sensor_noise_dict=sensor_noise_dict, R=R, sigma=sigma)
+            self.FO.append(FO)
+
+            # Collect error variance data
+            ev = FO.error_variance.copy()
+            ev.insert(0, 'time_initial', self.time[k])
+            self.EV.append(ev)
+
+        # Concatenate error variance & make same size as simulation data
+        self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
+        self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
+        time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
+        self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
 
 
 class ObservabilityMatrixImage:
