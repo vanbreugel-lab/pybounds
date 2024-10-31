@@ -1,9 +1,7 @@
 
 import numpy as np
 import do_mpc
-from util import FixedKeysDict, SetDict
-
-# from typing import Callable
+from .util import FixedKeysDict, SetDict
 
 
 class Simulator(object):

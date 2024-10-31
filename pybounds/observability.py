@@ -7,7 +7,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import sympy as sp
-from util import LatexStates
+from .util import LatexStates
 
 
 class EmpiricalObservabilityMatrix:
