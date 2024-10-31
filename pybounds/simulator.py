@@ -1,49 +1,72 @@
 
 import numpy as np
 import do_mpc
-# import casadi
 from util import FixedKeysDict, SetDict
 
 # from typing import Callable
 
 
 class Simulator(object):
-    def __init__(self, f, h, x0, u0, dt=0.01,
+    def __init__(self, f, h, dt=0.01, n=None, m=None,
                  state_names=None, input_names=None, measurement_names=None,
                  params_simulator=None):
+
         """ Simulator.
-        :param float f: callable dynamics function f(X, U, t)
-        :param float h: callable measurement function h(X, U, t)
+
+        :param callable f: dynamics function f(X, U, t)
+        :param callable h: measurement function h(X, U, t)
         :param float dt: sampling time in seconds
+        :param int n: number of states, optional but cannot be set if state_names is set
+        :param int m: number of inputs, optional but cannot be set if input_names is set
+        :param list state_names: names of states, optional but cannot be set if n is set
+        :param list input_names: names of inputs, optional but cannot be set if m is set
+        :param list measurement_names: names of measurements, optional
+        :param dict params_simulator: simulation parameters, optional
         """
 
         self.f = f
         self.h = h
         self.dt = dt
 
-        # Set state & input sizes
-        self.n = len(x0)  # number of states
-        self.m = len(u0)  # number of inputs
-
-        # Run measurement function to get measurement size
-        y = self.h(x0, u0, 0)
-        self.p = len(y)  # number of measurements
-
         # Set state names
         if state_names is None:  # default state names
+            if n is None:
+                raise ValueError('must set state_names or n')
+            else:
+                self.n = int(n)
+
             self.state_names = ['x_' + str(n) for n in range(self.n)]
-        else:
-            self.state_names = state_names
-            if len(self.state_names) != self.n:
-                raise ValueError('state_names must have length equal to x0')
+        else:  # state names given
+            if n is not None:
+                raise ValueError('cannot set state_names and n')
+
+            self.state_names = list(state_names)
+            self.n = len(self.state_names)
+            # if len(self.state_names) != self.n:
+            #     raise ValueError('state_names must have length equal to x0')
 
         # Set input names
-        if input_names is None:  # default measurement names
+        if input_names is None:  # default input names
+            if m is None:
+                raise ValueError('must set input_names or m')
+            else:
+                self.m = int(m)
+
             self.input_names = ['u_' + str(m) for m in range(self.m)]
-        else:
-            self.input_names = input_names
-            if len(self.input_names) != self.m:
-                raise ValueError('input_names must have length equal to u0')
+        else:  # input names given
+            if m is not None:
+                raise ValueError('cannot set in and n')
+
+            self.input_names = list(input_names)
+            self.m = len(self.input_names)
+            # if len(self.input_names) != self.m:
+            #     raise ValueError('input_names must have length equal to u0')
+
+        # Run measurement function to get measurement size
+        x0 = np.ones(self.n)
+        u0 = np.ones(self.m)
+        y = self.h(x0, u0, 0)
+        self.p = len(y)  # number of measurements
 
         # Set measurement names
         if measurement_names is None:  # default measurement names
@@ -52,8 +75,6 @@ class Simulator(object):
             self.measurement_names = measurement_names
             if len(self.measurement_names) != self.p:
                 raise ValueError('measurement_names must have length equal to y')
-
-        self.output_mode = self.measurement_names
 
         # Initialize time vector
         w = 10  # initialize for w time-steps, but this can change later
@@ -169,8 +190,7 @@ class Simulator(object):
 
         :params x0: initial state dict or array
         :params u: input dict or array
-        :params output_mode: array of strings containing variable names of outputs
-        :params run_mpc: boolean to run MPC controller
+        :params return_full_output: boolean to run (time, x, u, y) instead of y
         """
 
         # Update the initial state
