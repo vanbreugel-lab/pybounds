@@ -27,11 +27,18 @@ Alternatively using pip
 pip install pybounds
 ```
 
-
 ## Notebook examples
 There is currently one simple example notebook. More to come.
 *  Monocular camera with optic fow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
 
+## Citation
+
+If you use the code or methods from this package, please cite the following paper:
+
+Benjamin Cellini, Burak Boyacıoğlu, Stanley David Stupski, and Floris van Breugel. Discovering and exploiting active sensing motifs for estimation with empirical observability. (2024) bioRxiv.
+
+## Related packages
+This repository is the evolution of the EISO repo (https://github.com/BenCellini/EISO), and is intended as a companion to the repository directly associated with the paper above.
 
 ## License
 
