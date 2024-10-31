@@ -5,13 +5,13 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pybounds", # Replace with your own username
-    version="0.0.1",
+    version="0.0.2",
     author="Ben Cellini, Burak Boyacioglu, Floris van Breugel",
     author_email="bcellini00@gmail.com",
     description="Bounding Observability for Uncertain Nonlinear Dynamics Systems (BOUNDS)",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/vanbreugel-lab/pybounds",
+    url="https://pypi.org/project/pybounds/",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
