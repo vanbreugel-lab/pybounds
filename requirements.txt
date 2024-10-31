@@ -1,0 +1,6 @@
+do_mpc==4.6.5
+matplotlib==3.9.2
+numpy==1.26.4
+pandas==2.2.3
+setuptools==75.1.0
+sympy==1.13.3
