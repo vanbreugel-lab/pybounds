@@ -1,9 +1,10 @@
-
 import numpy as np
 import pandas as pd
-from multiprocessing import Pool
+# from multiprocessing import Pool
+# from pathos.multiprocessing import ProcessingPool as Pool
+from concurrent.futures import ThreadPoolExecutor
 import warnings
-import matplotlib as mpl
+# import matplotlib as mpl
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import sympy as sp
@@ -92,8 +93,11 @@ class EmpiricalObservabilityMatrix:
         # Run simulations for perturbed initial conditions
         state_index = np.arange(0, self.n).tolist()
         if self.parallel:  # multiprocessing
-            with Pool(4) as pool:
-                results = pool.map(self.simulate, state_index)
+            # with Pool(4) as pool:
+            #     results = pool.map(self.simulate, state_index)
+
+            with ThreadPoolExecutor() as executor:
+                results = list(executor.map(self.simulate, state_index))
 
             for n, r in enumerate(results):
                 delta_y, y_plus, y_minus = r
@@ -147,7 +151,7 @@ class SlidingEmpiricalObservabilityMatrix:
     def __init__(self, simulator, t_sim, x_sim, u_sim, w=None, eps=1e-5,
                  parallel_sliding=False, parallel_perturbation=False):
         """ Construct empirical observability matrix O in sliding windows along a trajectory.
-        
+
         :param callable simulator: Simulator object : y = simulator(x0, u, **kwargs)
             y is (w x p) array. w is the number of time-steps and p is the number of measurements
         :param np.array t_sim: time vector size N
@@ -201,7 +205,7 @@ class SlidingEmpiricalObservabilityMatrix:
             raise ValueError('window size must be smaller than trajectory length')
 
         # All the indices to calculate O
-        self.O_index = np.arange(0, self.N - self.w + 1,  step=1)  # indices to compute O
+        self.O_index = np.arange(0, self.N - self.w + 1, step=1)  # indices to compute O
         self.O_time = self.t_sim[self.O_index]  # times to compute O
         self.n_point = len(self.O_index)  # # of times to calculate O
 
@@ -229,8 +233,12 @@ class SlidingEmpiricalObservabilityMatrix:
         # Construct O's
         n_point_range = np.arange(0, self.n_point).astype(int)
         if self.parallel_sliding:  # multiprocessing
-            with Pool(4) as pool:
-                results = pool.map(self.construct, n_point_range)
+            # with Pool(4) as pool:
+            #     results = pool.map(self.construct, n_point_range)
+
+            with ThreadPoolExecutor(max_workers=12) as executor:
+                results = list(executor.map(self.construct, n_point_range))
+
                 for r in results:
                     self.O_sliding.append(r[0])
                     self.O_df_sliding.append(r[1])
@@ -262,7 +270,8 @@ class SlidingEmpiricalObservabilityMatrix:
         u_win = self.u_sim[win, :]  # inputs in window
 
         # Calculate O for window
-        EOM = EmpiricalObservabilityMatrix(self.simulator, x0, t_win0, u_win, eps=self.eps, parallel=self.parallel_perturbation)
+        EOM = EmpiricalObservabilityMatrix(self.simulator, x0, t_win0, u_win, eps=self.eps,
+                                           parallel=self.parallel_perturbation)
         self.EOM = EOM
 
         # Store data
