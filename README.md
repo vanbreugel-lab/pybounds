@@ -3,15 +3,8 @@
 Python implementation of BOUNDS: Bounding Observability for Uncertain Nonlinear Dynamic Systems.
 
 <p align="center">
-  <a href="https://pynumdiff.readthedocs.io/en/master/" target="_blank" >
-
-[//]: # (    <img alt="Python for Numerical Differentiation of noisy time series data" src="docs/source/_static/logo_PyNumDiff.png" width="300" height="200" />)
-  </a>
-</p>
-
-<p align="center">
     <a href="https://pypi.org/project/pybounds/">
-        <img src="https://badge.fury.io/py/pynumdiff.svg" alt="PyPI version" height="18"></a>
+        <img src="https://badge.fury.io/py/pybounds.svg" alt="PyPI version" height="18"></a>
 </p>
 
 ## Introduction
@@ -28,8 +21,11 @@ pip install pybounds
 ```
 
 ## Notebook examples
-There is currently one simple example notebook. More to come.
+For a simple system
 *  Monocular camera with optic fow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
+
+For a more complex system
+*  Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)[mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
 
 ## Citation
 

@@ -74,6 +74,7 @@ class LatexStates:
                      'v_perp': r'$v_{\perp}$',
                      'phi': r'$\phi$',
                      'phidot': r'$\dot{\phi}$',
+                     'phi_dot': r'$\dot{\phi}$',
                      'phiddot': r'$\ddot{\phi}$',
                      'w': r'$w$',
                      'zeta': r'$\zeta$',
@@ -97,7 +98,9 @@ class LatexStates:
                      'v_para_dot_ratio': r'$\frac{\Delta v_{\parallel}}{v_{\parallel}}$',
                      'sigma': r'$\sigma$',
                      'rho': r'$\rho$',
-                     'beta': r'$\beta$'
+                     'beta': r'$\beta$',
+                     'lambda': r'$\lambda',
+                     'delta': r'$\delta'
                      }
 
         if dict is not None:
