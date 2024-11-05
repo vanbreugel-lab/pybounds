@@ -1,5 +1,7 @@
 
+import warnings
 import numpy as np
+import matplotlib.pyplot as plt
 import do_mpc
 from .util import FixedKeysDict, SetDict
 
@@ -7,7 +9,7 @@ from .util import FixedKeysDict, SetDict
 class Simulator(object):
     def __init__(self, f, h, dt=0.01, n=None, m=None,
                  state_names=None, input_names=None, measurement_names=None,
-                 params_simulator=None):
+                 params_simulator=None, mpc_horizon=10):
 
         """ Simulator.
 
@@ -63,7 +65,7 @@ class Simulator(object):
         # Run measurement function to get measurement size
         x0 = np.ones(self.n)
         u0 = np.ones(self.m)
-        y = self.h(x0, u0, 0)
+        y = self.h(x0, u0)
         self.p = len(y)  # number of measurements
 
         # Set measurement names
@@ -75,31 +77,39 @@ class Simulator(object):
                 raise ValueError('measurement_names must have length equal to y')
 
         # Initialize time vector
-        w = 10  # initialize for w time-steps, but this can change later
-        self.time = np.arange(0, w * self.dt + self.dt / 2, step=self.dt)  # time vector
+        self.w = 11  # initialize for w time-steps, but this can change later
+        self.time = np.arange(0, self.w * self.dt, step=self.dt)  # time vector
 
         # Define initial states & initialize state time-series
         self.x0 = {}
         self.x = {}
         for n, state_name in enumerate(self.state_names):
             self.x0[state_name] = x0[n]
-            self.x[state_name] = x0[n] * np.ones(w)
+            self.x[state_name] = x0[n] * np.ones(self.w)
 
         self.x0 = FixedKeysDict(self.x0)
+        self.x = FixedKeysDict(self.x)
 
         # Initialize input time-series
         self.u = {}
         for m, input_name in enumerate(self.input_names):
-            self.u[input_name] = u0[m] * np.ones(w)
+            self.u[input_name] = u0[m] * np.ones(self.w)
 
         self.u = FixedKeysDict(self.u)
 
         # Initialize measurement time-series
         self.y = {}
         for p, measurement_name in enumerate(self.measurement_names):
-            self.y[measurement_name] = 0.0 * np.ones(w)
+            self.y[measurement_name] = 0.0 * np.ones(self.w)
 
         self.y = FixedKeysDict(self.y)
+
+        # Initialize state set-points
+        self.setpoint = {}
+        for n, state_name in enumerate(self.state_names):
+            self.setpoint[state_name] = 0.0 * np.ones(self.w)
+
+        self.setpoint = FixedKeysDict(self.setpoint)
 
         # Define continuous-time MPC model
         self.model = do_mpc.model.Model('continuous')
@@ -117,9 +127,13 @@ class Simulator(object):
             U.append(u)
 
         # Define dynamics
-        Xdot = self.f(X, U, 0)
+        Xdot = self.f(X, U)
         for n, state_name in enumerate(self.state_names):
             self.model.set_rhs(state_name, Xdot[n])
+
+        # Add time-varying set-point variables for later use with MPC
+        for n, state_name in enumerate(self.state_names):
+            x = self.model.set_variable(var_type='_tvp', var_name=state_name + str('_set'), shape=(1, 1))
 
         # Build model
         self.model.setup()
@@ -139,7 +153,80 @@ class Simulator(object):
             self.params_simulator = params_simulator
 
         self.simulator.set_param(**self.params_simulator)
+
+        # Setup MPC
+        self.mpc = do_mpc.controller.MPC(self.model)
+        self.mpc_horizon = mpc_horizon
+        setup_mpc = {
+            'n_horizon': self.mpc_horizon,
+            'n_robust': 0,
+            'open_loop': 0,
+            't_step': self.dt,
+            'state_discretization': 'collocation',
+            'collocation_type': 'radau',
+            'collocation_deg': 2,
+            'collocation_ni': 1,
+            'store_full_solution': False,
+
+            # Use MA27 linear solver in ipopt for faster calculations:
+            'nlpsol_opts': {'ipopt.linear_solver': 'mumps',  # mumps, MA27
+                            'ipopt.print_level': 0,
+                            'ipopt.sb': 'yes',
+                            'print_time': 0,
+                            }
+        }
+
+        self.mpc.set_param(**setup_mpc)
+
+        # Get template's for MPC time-varying parameters
+        self.mpc_tvp_template = self.mpc.get_tvp_template()
+        self.simulator_tvp_template = self.simulator.get_tvp_template()
+
+        # Set time-varying set-point functions
+        self.mpc.set_tvp_fun(self.mpc_tvp_function)
+        self.simulator.set_tvp_fun(self.simulator_tvp_function)
+
+        # Setup simulator
         self.simulator.setup()
+
+    def simulator_tvp_function(self, t):
+        """ Set the set-point function for MPC simulator.
+        :param t: current time
+        """
+
+        mpc_horizon = self.mpc._settings.n_horizon
+
+        # Set current step index
+        k_step = int(np.round(t / self.dt))
+        if k_step >= mpc_horizon:  # point is beyond end of input data
+            k_step = mpc_horizon - 1  # set point beyond input data to last point
+
+        # Update current set-point
+        for n, state_name in enumerate(self.state_names):
+            self.simulator_tvp_template[state_name + '_set'] = self.setpoint[state_name][k_step]
+
+        return self.simulator_tvp_template
+
+    def mpc_tvp_function(self, t):
+        """ Set the set-point function for MPC optimizer.
+        """
+
+        mpc_horizon = self.mpc._settings.n_horizon
+
+        # Set current step index
+        k_step = int(np.round(t / self.dt))
+
+        # Update set-point time horizon
+        for k in range(mpc_horizon + 1):
+            k_set = k_step + k
+            if k_set >= self.w:  # horizon is beyond end of input data
+                k_set = self.w - 1  # set part of horizon beyond input data to last point
+
+            # Update each set-point over time horizon
+            for n, state_name in enumerate(self.state_names):
+                self.mpc_tvp_template['_tvp', k, state_name + '_set'] = self.setpoint[state_name][k_set]
+
+        return self.mpc_tvp_template
 
     def set_initial_state(self, x0):
         """ Update the initial state.
@@ -156,33 +243,35 @@ class Simulator(object):
             else:
                 raise Exception('x0 must be either a dict, tuple, list, or numpy array')
 
-    def set_inputs(self, u):
-        """ Update the inputs.
+    def update_dict(self, data=None, name=None):
+        """ Update.
         """
 
-        if u is not None:  # inputs given
-            if isinstance(u, dict):  # in dict format
-                SetDict().set_dict_with_overwrite(self.u, u)  # update only the inputs in the dict given
-            elif isinstance(u, list) or isinstance(u, tuple):  # list or tuple format, each input vector in each element
-                for n, k in enumerate(self.u.keys()):  # each input
-                    self.u[k] = u[n]
-            elif isinstance(u, np.ndarray):  # numpy array format given as matrix where columns are the different inputs
-                if len(u.shape) <= 1:  # given as 1d array, so convert to column vector
-                    u = np.atleast_2d(u).T
+        update = getattr(self, name)
 
-                for m, key in enumerate(self.u.keys()):  # each input
-                    self.u[key] = u[:, m]
+        if data is not None:  # data given
+            if isinstance(data, dict):  # in dict format
+                SetDict().set_dict_with_overwrite(update, data)  # update only the inputs in the dict given
+            elif isinstance(data, list) or isinstance(data, tuple):  # list or tuple format, each input vector in each element
+                for n, k in enumerate(update.keys()):  # each state
+                    update[k] = data[n]
+            elif isinstance(data, np.ndarray):  # numpy array format given as matrix where columns are the different inputs
+                if len(data.shape) <= 1:  # given as 1d array, so convert to column vector
+                    data = np.atleast_2d(data).T
+
+                for n, key in enumerate(update.keys()):  # each input
+                    update[key] = data[:, n]
 
             else:
-                raise Exception('u must be either a dict, tuple, list, or numpy array')
+                raise Exception(name + ' must be either a dict, tuple, list, or numpy array')
 
         # Make sure inputs are the same size
-        points = np.array([self.u[key].shape[0] for key in self.u.keys()])
+        points = np.array([update[key].shape[0] for key in update.keys()])
         points_check = points == points[0]
         if not np.all(points_check):
-            raise Exception('inputs are not the same size')
+            raise Exception(name + ' not the same size')
 
-    def simulate(self, x0=None, u=None, return_full_output=False):
+    def simulate(self, x0=None, u=None, mpc=False, return_full_output=False):
         """
         Simulate the system.
 
@@ -191,34 +280,63 @@ class Simulator(object):
         :params return_full_output: boolean to run (time, x, u, y) instead of y
         """
 
+        if (mpc is True) and (u is not None):
+            raise Exception('u must be None if running MPC')
+
+        if (mpc is False) and (u is None):
+            warnings.warn('not running MPC or setting u directly')
+
         # Update the initial state
-        self.set_initial_state(x0=x0.copy())
+        if x0 is None:
+            if mpc:  # set the initial state to start at set-point if running MPC
+                x0 = {}
+                for state_name in self.state_names:
+                    x0[state_name] = self.setpoint[state_name][0]
+
+                self.set_initial_state(x0=x0)
+        else:
+            self.set_initial_state(x0=x0)
 
         # Update the inputs
-        self.set_inputs(u=u)
+        self.update_dict(u, name='u')
 
         # Concatenate the inputs, where rows are individual inputs and columns are time-steps
-        u_sim = np.vstack(list(self.u.values())).T
-        n_point = u_sim.shape[0]
+        if mpc:
+            self.w = np.vstack(list(self.setpoint.values())).shape[1]
+            u_sim = np.zeros((self.w, self.m))  # preallocate input array
+        else:
+            self.w = np.vstack(list(self.u.values())).shape[1]
+            u_sim = np.vstack(list(self.u.values())).T
 
         # Update time vector
-        T = (n_point - 1) * self.dt
-        self.time = np.linspace(0, T, num=n_point)
+        T = (self.w - 1) * self.dt
+        self.time = np.linspace(0, T, num=self.w)
 
         # Set array to store simulated states, where rows are individual states and columns are time-steps
         x_step = np.array(list(self.x0.values()))  # initialize state
-        x_sim = np.nan * np.zeros((n_point, self.n))
-        x_sim[0, :] = x_step.copy()
+        x = np.nan * np.zeros((self.w, self.n))
+        x[0, :] = x_step.copy()
 
         # Initialize the simulator
         self.simulator.t0 = self.time[0]
         self.simulator.x0 = x_step.copy()
         self.simulator.set_initial_guess()
 
+        # Initialize MPC
+        if mpc:
+            self.mpc.setup()
+            self.mpc.t0 = self.time[0]
+            self.mpc.x0 = x_step.copy()
+            self.mpc.u0 = np.zeros((self.m, 1))
+            self.mpc.set_initial_guess()
+
         # Run simulation
-        for k in range(1, n_point):
+        for k in range(1, self.w):
             # Set input
-            u_step = u_sim[k - 1:k, :].T
+            if mpc:  # run MPC step
+                u_step = self.mpc.make_step(x_step)
+            else:  # use inputs directly
+                u_step = u_sim[k - 1:k, :].T
 
             # Store inputs
             u_sim[k - 1, :] = u_step.squeeze()
@@ -227,26 +345,27 @@ class Simulator(object):
             x_step = self.simulator.make_step(u_step)
 
             # Store new states
-            x_sim[k, :] = x_step.squeeze()
+            x[k, :] = x_step.squeeze()
+
+        # Last input has no effect, so keep it the same as previous time-step
+        if mpc:
+            u_sim[-1, :] = u_sim[-2, :]
 
         # Update the inputs
-        self.set_inputs(u=u_sim)
+        self.update_dict(u_sim, name='u')
 
         # Update state trajectory
-        for n, key in enumerate(self.x.keys()):
-            self.x[key] = x_sim[:, n]
+        self.update_dict(x, name='x')
 
         # Calculate measurements
         x_list = list(self.x.values())
         u_list = list(self.u.values())
-        y = self.h(x_list, u_list, 0)
+        y = self.h(x_list, u_list)
 
-        # Set outputs
-        self.y = {}
-        for p, measurement_name in enumerate(self.measurement_names):
-            self.y[measurement_name] = y[p]
+        # Set measurements
+        self.update_dict(y, name='y')
 
-        # Return the outputs in array format
+        # Return the measurements in array format
         y_array = np.vstack(list(self.y.values())).T
 
         if return_full_output:
@@ -254,7 +373,50 @@ class Simulator(object):
         else:
             return y_array
 
-    def get_time_states_input_measurements(self):
+    def get_time_states_inputs_measurements(self):
         return self.time.copy(), self.x.copy(), self.u.copy(), self.u.copy()
 
+    def plot(self, name='x', dpi=150, plot_kwargs=None):
+        """ Plot states, inputs.
+        """
 
+        if plot_kwargs is None:
+            plot_kwargs = {
+                'color': 'black',
+                'linewidth': 2.0,
+                'linestyle': '-',
+                'marker': '.',
+                'markersize': 0
+            }
+
+            if name == 'x':
+                plot_kwargs['color'] = 'firebrick'
+            elif name == 'u':
+                plot_kwargs['color'] = 'royalblue'
+            elif name == 'y':
+                plot_kwargs['color'] = 'seagreen'
+            elif name == 'setpoint':
+                plot_kwargs['color'] = 'gray'
+
+        plot_dict = getattr(self, name)
+        plot_data = np.array(list(plot_dict.values()))
+        n = plot_data.shape[0]
+
+        fig, ax = plt.subplots(n, 1, figsize=(4, n * 1.5), dpi=dpi, sharex=True)
+        ax = np.atleast_1d(ax)
+
+        for n, key in enumerate(plot_dict.keys()):
+            ax[n].plot(self.time, plot_dict[key], label='set-point', **plot_kwargs)
+            ax[n].set_ylabel(key, fontsize=7)
+
+            # Also plot the states if plotting setpoint
+            if name == 'setpoint':
+                ax[n].plot(self.time, self.x[key], label=key, color='firebrick', linestyle='-', linewidth=0.5)
+                ax[n].legend(fontsize=6)
+
+        ax[-1].set_xlabel('time', fontsize=7)
+        ax[0].set_title(name, fontsize=8, fontweight='bold')
+
+
+        for a in ax.flat:
+            a.tick_params(axis='both', labelsize=6)
