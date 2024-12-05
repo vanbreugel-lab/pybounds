@@ -12,10 +12,10 @@ from .util import LatexStates
 
 
 class EmpiricalObservabilityMatrix:
-    def __init__(self, simulator, x0, time, u, eps=1e-5, parallel=False):
+    def __init__(self, simulator, x0, u, eps=1e-5, parallel=False):
         """ Construct an empirical observability matrix O.
 
-        :param callable Simulator: Simulator object : y = simulator(x0, u, **kwargs)
+        :param callable simulator: simulator object  that has a method y = simulator.simulate(x0, u, **kwargs)
             y is (w x p) array. w is the number of time-steps and p is the number of measurements
         :param dict/list/np.array x0: initial state for Simulator
         :param dict/np.array u: inputs array
@@ -25,7 +25,6 @@ class EmpiricalObservabilityMatrix:
 
         # Store inputs
         self.simulator = simulator
-        self.time = time.copy()
         self.eps = eps
         self.parallel = parallel
 
@@ -48,6 +47,9 @@ class EmpiricalObservabilityMatrix:
         # Number of outputs
         self.p = self.y_nominal.shape[1]
 
+        # Number of time-steps
+        self.w = self.y_nominal.shape[0]  # of points in time window
+
         # Check for state/measurement names
         if hasattr(self.simulator, 'state_names'):
             self.state_names = self.simulator.state_names
@@ -60,7 +62,6 @@ class EmpiricalObservabilityMatrix:
             self.measurement_names = ['y_' + str(p) for p in range(self.p)]
 
         # Perturbation amounts
-        self.w = len(self.time)  # of points in time window
         self.delta_x = eps * np.eye(self.n)  # perturbation amount for each state
         self.delta_y = np.zeros((self.p, self.n, self.w))  # preallocate delta_y
         self.y_plus = np.zeros((self.w, self.n, self.p))
@@ -154,7 +155,7 @@ class SlidingEmpiricalObservabilityMatrix:
 
         :param callable simulator: Simulator object : y = simulator(x0, u, **kwargs)
             y is (w x p) array. w is the number of time-steps and p is the number of measurements
-        :param np.array t_sim: time vector size N
+        :param np.array t_sim: time values along state trajectory array (N, 1)
         :param np.array x_sim: state trajectory array (N, n), can also be dict
         :param np.array u_sim: input array (N, m), can also be dict
         :param np.array w: window size for O calculations, will automatically set how many windows to compute
@@ -270,7 +271,7 @@ class SlidingEmpiricalObservabilityMatrix:
         u_win = self.u_sim[win, :]  # inputs in window
 
         # Calculate O for window
-        EOM = EmpiricalObservabilityMatrix(self.simulator, x0, t_win0, u_win, eps=self.eps,
+        EOM = EmpiricalObservabilityMatrix(self.simulator, x0, u_win, eps=self.eps,
                                            parallel=self.parallel_perturbation)
         self.EOM = EOM
 
