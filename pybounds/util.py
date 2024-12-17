@@ -1,8 +1,8 @@
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.collections as mcoll
 import matplotlib.patheffects as path_effects
+
 
 class FixedKeysDict(dict):
     def __init__(self, *args, **kwargs):
@@ -96,11 +96,46 @@ class LatexStates:
                      'v_para_dot': r'$\dot{v_{\parallel}}$',
                      'v_perp_dot': r'$\dot{v_{\perp}}$',
                      'v_para_dot_ratio': r'$\frac{\Delta v_{\parallel}}{v_{\parallel}}$',
-                     'sigma': r'$\sigma$',
-                     'rho': r'$\rho$',
-                     'beta': r'$\beta$',
-                     'lambda': r'$\lambda',
-                     'delta': r'$\delta'
+                     'x':  r'$x$',
+                     'y':  r'$y$',
+                     'v_x': r'$v_{x}$',
+                     'v_y': r'$v_{y}$',
+                     'v_z': r'$v_{z}$',
+                     'w_x': r'$w_{x}$',
+                     'w_y': r'$w_{y}$',
+                     'w_z': r'$w_{z}$',
+                     'a_x': r'$a_{x}$',
+                     'a_y': r'$a_{y}$',
+                     'vx': r'$v_x$',
+                     'vy': r'$v_y$',
+                     'vz': r'$v_z$',
+                     'wx': r'$w_x$',
+                     'wy': r'$w_y$',
+                     'wz': r'$w_z$',
+                     'ax': r'$ax$',
+                     'ay': r'$ay$',
+                     'beta': r'$\beta',
+                     'thetadot': r'$\dot{\theta}$',
+                     'theta_dot': r'$\dot{\theta}$',
+                     'psidot': r'$\dot{\psi}$',
+                     'psi_dot': r'$\dot{\psi}$',
+                     'theta': r'$\theta$',
+                     'Yaw': r'$\psi$',
+                     'R': r'$\phi$',
+                     'P': r'$\theta$',
+                     'dYaw': r'$\dot{\psi}$',
+                     'dP': r'$\dot{\theta}$',
+                     'dR': r'$\dot{\phi}$',
+                     'acc_x': r'$\dot{v}x$',
+                     'acc_y': r'$\dot{v}y$',
+                     'acc_z': r'$\dot{v}z$',
+                     'Psi': r'$\Psi$',
+                     'Ix': r'$I_x$',
+                     'Iy': r'$I_y$',
+                     'Iz': r'$I_z$',
+                     'Jr': r'$J_r$',
+                     'Dl': r'$D_l$',
+                     'Dr': r'$D_r$',
                      }
 
         if dict is not None:
