@@ -369,7 +369,7 @@ class Simulator(object):
         y_array = np.vstack(list(self.y.values())).T
 
         if return_full_output:
-            return self.time.copy(), self.x.copy(), self.u.copy(), self.u.copy()
+            return self.time.copy(), self.x.copy(), self.u.copy(), self.y.copy()
         else:
             return y_array
 
@@ -406,7 +406,7 @@ class Simulator(object):
         ax = np.atleast_1d(ax)
 
         for n, key in enumerate(plot_dict.keys()):
-            ax[n].plot(self.time, plot_dict[key], label='set-point', **plot_kwargs)
+            ax[n].plot(self.time, plot_dict[key], label=name, **plot_kwargs)
             ax[n].set_ylabel(key, fontsize=7)
 
             # Also plot the states if plotting setpoint
@@ -414,9 +414,18 @@ class Simulator(object):
                 ax[n].plot(self.time, self.x[key], label=key, color='firebrick', linestyle='-', linewidth=0.5)
                 ax[n].legend(fontsize=6)
 
+                y = self.x[key]
+                y_min = np.min(y)
+                y_max = np.max(y)
+                delta = y_max - y_min
+                if np.abs(delta) < 0.01:
+                    margin = 0.1
+                    ax[n].set_ylim(y_min - margin, y_max + margin)
+                else:
+                    margin = 0.0
+
         ax[-1].set_xlabel('time', fontsize=7)
         ax[0].set_title(name, fontsize=8, fontweight='bold')
-
 
         for a in ax.flat:
             a.tick_params(axis='both', labelsize=6)
