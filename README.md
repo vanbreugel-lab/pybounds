@@ -25,7 +25,7 @@ For a simple system
 *  Monocular camera with optic fow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
 
 For a more complex system
-*  Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)[mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
+*  Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)
 
 ## Citation
 
