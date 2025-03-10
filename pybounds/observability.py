@@ -299,11 +299,11 @@ class FisherObservability:
             w is the number of time-steps, p is the number of measurements, and n in the number of states
             can also be set as pd.DataFrame where columns set the state names & a multilevel index sets the
             measurement names: O.index names must be ('sensor', 'time_step')
-        :param np.array R: measurement noise covariance matrix (w*p x w*p)
+        :param None | np.array | float| dict  R: measurement noise covariance matrix (w*p x w*p)
             can also be set as pd.DataFrame where R.index = R.columns = O.index
-            can also be a scaler where R = R * I
-        :param dict sensor_noise_dict: constructs R by setting the noise levels for each sensor across time-steps
-            keys must correspond to the 'sensor' index in O data-frame, can only be set if R is None
+            can also be a scaler where R = R * I_(nxn)
+            can also be dict where keys must correspond to the 'sensor' index in O data-frame
+            if None, then R = I_(nxn)
         :param float lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
         """
 
@@ -324,7 +324,7 @@ class FisherObservability:
         # Set measurement noise covariance matrix
         self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
         self.R_inv = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-        self.set_noise_covariance(R=R, sensor_noise_dict=sensor_noise_dict)
+        self.set_noise_covariance(R=R)
 
         # Calculate Fisher Information Matrix
         self.F = self.O.values.T @ self.R_inv.values @ self.O.values
@@ -353,7 +353,7 @@ class FisherObservability:
         # Pull out diagonal elements
         self.error_variance = pd.DataFrame(np.diag(self.F_inv), index=self.O.columns).T
 
-    def set_noise_covariance(self, R=None, sensor_noise_dict=None):
+    def set_noise_covariance(self, R=None):
         """ Set the measurement noise covariance matrix.
         """
 
@@ -361,19 +361,15 @@ class FisherObservability:
         self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
 
         # Set R based on values in dict
-        if sensor_noise_dict is not None:  # set each distinct sensor's noise level
-            if R is not None:
-                raise Exception('R can not be set directly if sensor_noise_dict is set')
-            else:
-                # for s in self.R.index.levels[0]:
-                for s in pd.unique(self.R.index.get_level_values('sensor')):
-                    R_sensor = self.R.loc[[s], [s]]
-                    for r in range(R_sensor.shape[0]):
-                        R_sensor.iloc[r, r] = sensor_noise_dict[s]
+        if isinstance(R, dict):  # set each distinct sensor's noise level
+            for s in pd.unique(self.R.index.get_level_values('sensor')):
+                R_sensor = self.R.loc[[s], [s]]
+                for r in range(R_sensor.shape[0]):
+                    R_sensor.iloc[r, r] = R[s]
 
-                    self.R.loc[[s], [s]] = R_sensor.values
+                self.R.loc[[s], [s]] = R_sensor.values
         else:
-            if R is None:
+            if R is None:  # set R as identity matrix
                 warnings.warn('R not set, defaulting to identity matrix')
             else:  # set R directly
                 if np.atleast_1d(R).shape[0] == 1:  # given scalar
@@ -382,8 +378,10 @@ class FisherObservability:
                     self.R = R.copy()
                 elif isinstance(R, np.ndarray):  # matrix in array
                     self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
+                elif isinstance(R, float) or isinstance(R, int):  # set as scalar multiplied by identity matrix
+                    self.R = R * self.R
                 else:
-                    raise Exception('R must be a numpy array, pandas data-frame, or scalar value')
+                    raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
 
         # Inverse of R
         R_diagonal = np.diag(self.R.values)
@@ -400,22 +398,23 @@ class FisherObservability:
 
 
 class SlidingFisherObservability:
-    def __init__(self, O_list, time=None, lam=1e6, R=None, sensor_noise_dict=None,
+    def __init__(self, O_list, time=None, lam=1e6, R=None,
                  states=None, sensors=None, time_steps=None, w=None):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
         :param list O_list: list of observability matrices O (stored as pd.DataFrame)
-        :param np.array time: time vector the same size as O_list
-        :param np.array lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
-        :param np.array R: measurement noise covariance matrix (w*p x w*p)
+        :param None | np.array time: time vector the same size as O_list
+        :param float | np.array lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
+        :param None | np.array | float| dict  R: measurement noise covariance matrix (w*p x w*p)
             can also be set as pd.DataFrame where R.index = R.columns = O.index
-            can also be a scaler where R = R * I
-        :param dict sensor_noise_dict: constructs R by setting the noise levels for each sensor across time-steps
-            keys must correspond to the 'sensor' index in O data-frame, can only be set if R is None
-        :param list states: list of states to use from O's. ex: ['g', 'd']
-        :param list sensors: list of sensors to use from O's, ex: ['r']
-        :param np.array time_steps: array of time steps to use from O's, ex: np.array([0, 1, 2])
-        :param np.array w: window size to use from O's, if None then just grab it from O
+            can also be a scaler where R = R * I_(nxn)
+            can also be dict where keys must correspond to the 'sensor' index in O data-frame
+            if None, then R = I_(nxn)
+        :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
+        :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
+        :param None | tuple | list | np.array time_steps: array of time steps to use from O's, ex: np.array([0, 1, 2])
+        :param None | tuple | list | np.array w: window size to use from O's,
+            if None then just grab it from O as the maximum window size
         """
 
         self.O_list = O_list
@@ -427,7 +426,14 @@ class SlidingFisherObservability:
         else:
             self.time = np.array(time)
 
-        self.dt = np.mean(np.diff(self.time))
+        # Set time-step
+        if time is not None:
+            if self.n_window > 1:  # compute time-step from vector
+                self.dt = np.mean(np.diff(self.time))
+            else:
+                self.dt = 0.0
+        else:  # default is time-step of 1
+            self.dt = 1
 
         # Get single O
         O = O_list[0]
@@ -457,10 +463,8 @@ class SlidingFisherObservability:
             self.time_steps = np.array(time_steps)
 
         # Compute Fisher information matrix & inverse for each sliding window
-        self.EV = []  # collect error variance data for each state over time
-        self.FO = []
-        self.shift_index = int(np.round((1 / 2) * self.w))
-        self.shift_time = self.shift_index * self.dt  # shift the time forward by half the window size
+        self.EV = []  # collect error variance data for each state over windows
+        self.FO = []  # collect FisherObservability objects over windows
         for k in range(self.n_window):  # each window
             # Get full O
             O = self.O_list[k]
@@ -469,7 +473,7 @@ class SlidingFisherObservability:
             O_subset = O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
 
             # Compute Fisher information & inverse
-            FO = FisherObservability(O_subset, sensor_noise_dict=sensor_noise_dict, R=R, lam=lam)
+            FO = FisherObservability(O_subset, R=R, lam=lam)
             self.FO.append(FO)
 
             # Collect error variance data
@@ -478,10 +482,15 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
+        self.shift_index = int(np.round((1 / 2) * self.w))
+        self.shift_time = self.shift_index * self.dt  # shift the time forward by half the window size
         self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
-        self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
-        time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
-        self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
+        if self.n_window > 1:  # more than 1 window
+            self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
+            time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
+            self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
+        else:
+            self.EV_aligned = self.EV.copy()
 
     def get_minimum_error_variance(self):
         return self.EV_aligned.copy()

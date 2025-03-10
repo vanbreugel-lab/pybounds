@@ -374,7 +374,7 @@ class Simulator(object):
             return y_array
 
     def get_time_states_inputs_measurements(self):
-        return self.time.copy(), self.x.copy(), self.u.copy(), self.u.copy()
+        return self.time.copy(), self.x.copy(), self.u.copy(), self.y.copy()
 
     def plot(self, name='x', dpi=150, plot_kwargs=None):
         """ Plot states, inputs.
