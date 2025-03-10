@@ -1,18 +1,18 @@
 import numpy as np
 import pandas as pd
-# from multiprocessing import Pool
-# from pathos.multiprocessing import ProcessingPool as Pool
-from concurrent.futures import ThreadPoolExecutor
+import sympy as sp
 import warnings
-# import matplotlib as mpl
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-import sympy as sp
+from concurrent.futures import ThreadPoolExecutor
+
 from .util import LatexStates
+from .jacobian import SymbolicJacobian
 
 
 class EmpiricalObservabilityMatrix:
-    def __init__(self, simulator, x0, u, eps=1e-5, parallel=False):
+    def __init__(self, simulator, x0, u, eps=1e-5, parallel=False,
+                 z_function=None, z_state_names=None):
         """ Construct an empirical observability matrix O.
 
         :param callable simulator: simulator object  that has a method y = simulator.simulate(x0, u, **kwargs)
@@ -21,6 +21,12 @@ class EmpiricalObservabilityMatrix:
         :param dict/np.array u: inputs array
         :param float eps: epsilon value for perturbations to construct O, should be small number
         :param bool parallel: if True, run the perturbations in parallel
+        :param callable z_function: function that transforms coordinates from original to new states
+            must be of the form z = z_function(x), where x & z are the same size
+            should use sympy functions wherever possible
+            leave as None to maintain original coordinates
+        :param list | tuple z_state_names: (optional) names of states in new coordinates.
+            will only have an effect if O is a data-frame & z_function is not None
         """
 
         # Store inputs
@@ -81,8 +87,21 @@ class EmpiricalObservabilityMatrix:
 
         self.time_labels = np.hstack(self.time_labels)
 
-        # Run
+        # Run simulations to construct O
         self.run()
+
+        # Perform coordinate transformation on O, if specified
+        if z_function is not None:
+            self.O_df, self.dzdx, self.dxdz_sym = transform_states(O=self.O_df,
+                                                                   square_flag=False,
+                                                                   z_function=z_function,
+                                                                   x0=self.x0,
+                                                                   z_state_names=z_state_names)
+            self.state_names = tuple(self.O_df.columns)
+            self.O = self.O_df.values
+        else:
+            self.dzdx = None
+            self.dxdz_sym = None
 
     def run(self, parallel=None):
         """ Construct empirical observability matrix.
@@ -150,7 +169,8 @@ class EmpiricalObservabilityMatrix:
 
 class SlidingEmpiricalObservabilityMatrix:
     def __init__(self, simulator, t_sim, x_sim, u_sim, w=None, eps=1e-5,
-                 parallel_sliding=False, parallel_perturbation=False):
+                 parallel_sliding=False, parallel_perturbation=False,
+                 z_function=None, z_state_names=None):
         """ Construct empirical observability matrix O in sliding windows along a trajectory.
 
         :param callable simulator: Simulator object : y = simulator(x0, u, **kwargs)
@@ -160,7 +180,6 @@ class SlidingEmpiricalObservabilityMatrix:
         :param np.array u_sim: input array (N, m), can also be dict
         :param np.array w: window size for O calculations, will automatically set how many windows to compute
         :params float eps: tolerance for sliding windows
-        :param dict/np.array u: inputs array
         :param float eps: epsilon value for perturbations to construct O's, should be small number
         :param bool parallel_sliding: if True, run the sliding windows in parallel
         :param bool parallel_perturbation: if True, run the perturbations in parallel
@@ -170,6 +189,8 @@ class SlidingEmpiricalObservabilityMatrix:
         self.eps = eps
         self.parallel_sliding = parallel_sliding
         self.parallel_perturbation = parallel_perturbation
+        self.z_function = z_function
+        self.z_state_names = z_state_names
 
         # Set time vector
         self.t_sim = np.array(t_sim)
@@ -267,12 +288,14 @@ class SlidingEmpiricalObservabilityMatrix:
 
         # Pull out time & control inputs in window
         t_win = self.t_sim[win]  # time in window
-        t_win0 = t_win - t_win[0]  # start at 0
+        # t_win0 = t_win - t_win[0]  # start at 0
         u_win = self.u_sim[win, :]  # inputs in window
 
         # Calculate O for window
         EOM = EmpiricalObservabilityMatrix(self.simulator, x0, u_win, eps=self.eps,
-                                           parallel=self.parallel_perturbation)
+                                           parallel=self.parallel_perturbation,
+                                           z_function=self.z_function,
+                                           z_state_names=self.z_state_names)
         self.EOM = EOM
 
         # Store data
@@ -292,7 +315,7 @@ class SlidingEmpiricalObservabilityMatrix:
 
 
 class FisherObservability:
-    def __init__(self, O, R=None, sensor_noise_dict=None, lam=None):
+    def __init__(self, O, R=None, lam=None):
         """ Evaluate the observability of a state variable(s) using the Fisher Information Matrix.
 
         :param np.array O: observability matrix (w*p, n)
@@ -315,7 +338,7 @@ class FisherObservability:
             self.sensor_names = tuple(O.index.get_level_values('sensor'))
             self.state_names = tuple(O.columns)
         elif isinstance(O, np.ndarray):  # array given
-            self.sensor_names = tuple(['y' for n in range(self.pw)])
+            self.sensor_names = tuple(['y' for _ in range(self.pw)])
             self.state_names = tuple(['x_' + str(n) for n in range(self.n)])
             self.O = pd.DataFrame(O, index=self.sensor_names, columns=self.state_names)
         else:
@@ -494,6 +517,61 @@ class SlidingFisherObservability:
 
     def get_minimum_error_variance(self):
         return self.EV_aligned.copy()
+
+
+def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_state_names=None):
+    """ Transform the coordinates of an observability matrix (O) or Fisher information matrix (F)
+        from the original coordinates (x) to new user defined coordinates (z).
+
+        :param O: observability matrix or Fisher information matrix
+        :param boolean square_flag: whether to square the transform Jacobian or not
+            should be set to False if passing squared an observability matrix as O
+            should be set to True if passing squared a Fisher information matrix as O
+        :param callable z_function: function that transforms coordinates from original to new states
+            must be of the form z = z_function(x), where x & z are the same size
+            should use sympy functions wherever possible
+        :param np.array x0: initial state in original coordinates
+        :param list | tuple z_state_names: (optional) names of states in new coordinates.
+            will only have an effect if O or F is a data-frame
+
+        :return:
+            Z: observability matrix or Fisher information matrix in transformed coordinates
+            dzdx: numerical Jacobian dz/dx (inverse of dx/dz) evaluated at x0
+            dxdz_sym: symbolic Jacobian dx/dz
+    """
+
+    # Symbolic vector of original states
+    x_sym = sp.symbols('x_0:%d' % O.shape[1])
+
+    # Initialize the Jacobian calculator with a Python function
+    jacobian_calculator_func = SymbolicJacobian(func=z_function, state_vars=x_sym)
+
+    # Get the symbolic Jacobian dx/dz
+    dxdz_sym = jacobian_calculator_func.jacobian_symbolic
+
+    # Get the Jacobian calculator function
+    dxdz_function = jacobian_calculator_func.get_jacobian_function()
+
+    # Evaluate the Jacobian at x0
+    dxdz = dxdz_function(np.array(x0))
+
+    # Take the inverse
+    dzdx = np.linalg.inv(dxdz)
+
+    # Compute the new O or F
+    if square_flag:  # F
+        O_z = dzdx.T @ O @ dzdx
+    else:  # O
+        O_z = O @ dzdx
+
+    # Set column/index names if data-frame was passed
+    if isinstance(O_z, pd.DataFrame):
+        if z_state_names is not None:
+            O_z.columns = z_state_names
+            if square_flag:
+                O_z.index = z_state_names
+
+    return O_z, dzdx, dxdz_sym
 
 
 class ObservabilityMatrixImage:
