@@ -187,6 +187,7 @@ class Simulator(object):
         self.simulator.set_tvp_fun(self.simulator_tvp_function)
 
         # Setup simulator
+        self.simulator.set_param(store_simulator_stats=False)
         self.simulator.setup()
 
     def simulator_tvp_function(self, t):
@@ -318,6 +319,11 @@ class Simulator(object):
         x[0, :] = x_step.copy()
 
         # Initialize the simulator
+        # self.simulator = do_mpc.simulator.Simulator(self.model)
+        # self.simulator.set_param(**self.params_simulator)
+        # self.simulator.set_tvp_fun(self.simulator_tvp_function)
+        # self.simulator.setup()
+        self.simulator.reset_history()  # reset simulator history (super important for speed)
         self.simulator.t0 = self.time[0]
         self.simulator.x0 = x_step.copy()
         self.simulator.set_initial_guess()
