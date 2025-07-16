@@ -2,6 +2,7 @@
 import warnings
 import numpy as np
 import matplotlib.pyplot as plt
+import casadi
 import do_mpc
 from .util import FixedKeysDict, SetDict
 
@@ -129,7 +130,7 @@ class Simulator(object):
         # Define dynamics
         Xdot = self.f(X, U)
         for n, state_name in enumerate(self.state_names):
-            self.model.set_rhs(state_name, Xdot[n])
+            self.model.set_rhs(state_name, casadi.SX(Xdot[n]))
 
         # Add time-varying set-point variables for later use with MPC
         for n, state_name in enumerate(self.state_names):
@@ -420,14 +421,16 @@ class Simulator(object):
                 ax[n].legend(fontsize=6)
 
                 y = self.x[key]
-                y_min = np.min(y)
-                y_max = np.max(y)
-                delta = y_max - y_min
-                if np.abs(delta) < 0.01:
-                    margin = 0.1
-                    ax[n].set_ylim(y_min - margin, y_max + margin)
-                else:
-                    margin = 0.0
+            else:
+                y = plot_dict[key]
+
+            # Set y-axis limits
+            y_min = np.min(y)
+            y_max = np.max(y)
+            delta = y_max - y_min
+            if np.abs(delta) < 0.01:
+                margin = 0.1
+                ax[n].set_ylim(y_min - margin, y_max + margin)
 
         ax[-1].set_xlabel('time', fontsize=7)
         ax[0].set_title(name, fontsize=8, fontweight='bold')
