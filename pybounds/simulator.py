@@ -272,12 +272,14 @@ class Simulator(object):
         if not np.all(points_check):
             raise Exception(name + ' not the same size')
 
-    def simulate(self, x0=None, u=None, mpc=False, return_full_output=False):
+    def simulate(self, x0=None, u=None, aux=None, mpc=False, return_full_output=False):
         """
         Simulate the system.
 
         :params x0: initial state dict or array
-        :params u: input dict or array
+        :params u: input dict or array, if True then mpc must be None
+        :params aux: auxiliary input
+        :params mpc: boolean to run MPC, if True then u must be None
         :params return_full_output: boolean to run (time, x, u, y) instead of y
         """
 

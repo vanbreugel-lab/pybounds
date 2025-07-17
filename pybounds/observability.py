@@ -11,7 +11,7 @@ from .jacobian import SymbolicJacobian
 
 
 class EmpiricalObservabilityMatrix:
-    def __init__(self, simulator, x0, u, eps=1e-5, parallel=False,
+    def __init__(self, simulator, x0, u, aux=None, eps=1e-5, parallel=False,
                  z_function=None, z_state_names=None):
         """ Construct an empirical observability matrix O.
 
@@ -19,6 +19,7 @@ class EmpiricalObservabilityMatrix:
             y is (w x p) array. w is the number of time-steps and p is the number of measurements
         :param dict/list/np.array x0: initial state for Simulator
         :param dict/np.array u: inputs array
+        :param aux: auxiliary input that can be passed to Simulator class
         :param float eps: epsilon value for perturbations to construct O, should be small number
         :param bool parallel: if True, run the perturbations in parallel
         :param callable z_function: function that transforms coordinates from original to new states
@@ -31,6 +32,7 @@ class EmpiricalObservabilityMatrix:
 
         # Store inputs
         self.simulator = simulator
+        self.aux = aux
         self.eps = eps
         self.parallel = parallel
 
@@ -48,7 +50,7 @@ class EmpiricalObservabilityMatrix:
         self.n = self.x0.shape[0]
 
         # Simulate once for nominal trajectory
-        self.y_nominal = self.simulator.simulate(self.x0, self.u)
+        self.y_nominal = self.simulator.simulate(x0=self.x0, u=self.u, aux=self.aux)
 
         # Number of outputs
         self.p = self.y_nominal.shape[1]
@@ -158,8 +160,8 @@ class EmpiricalObservabilityMatrix:
         x0_minus = self.x0 - self.delta_x[:, n]
 
         # Simulate measurements from perturbed initial conditions
-        y_plus = self.simulator.simulate(x0=x0_plus, u=self.u)
-        y_minus = self.simulator.simulate(x0=x0_minus, u=self.u)
+        y_plus = self.simulator.simulate(x0=x0_plus, u=self.u, aux=self.aux)
+        y_minus = self.simulator.simulate(x0=x0_minus, u=self.u, aux=self.aux)
 
         # Calculate the numerical Jacobian & normalize by 2x the perturbation amount
         delta_y = np.array(y_plus - y_minus).T / (2 * self.eps)
@@ -168,7 +170,7 @@ class EmpiricalObservabilityMatrix:
 
 
 class SlidingEmpiricalObservabilityMatrix:
-    def __init__(self, simulator, t_sim, x_sim, u_sim, w=None, eps=1e-5,
+    def __init__(self, simulator, t_sim, x_sim, u_sim, aux_list=None, w=None, eps=1e-5,
                  parallel_sliding=False, parallel_perturbation=False,
                  z_function=None, z_state_names=None):
         """ Construct empirical observability matrix O in sliding windows along a trajectory.
@@ -178,6 +180,7 @@ class SlidingEmpiricalObservabilityMatrix:
         :param np.array t_sim: time values along state trajectory array (N, 1)
         :param np.array x_sim: state trajectory array (N, n), can also be dict
         :param np.array u_sim: input array (N, m), can also be dict
+        :param aux_list: auxiliary input that can be passed to Simulator class
         :param np.array w: window size for O calculations, will automatically set how many windows to compute
         :params float eps: tolerance for sliding windows
         :param float eps: epsilon value for perturbations to construct O's, should be small number
@@ -216,6 +219,15 @@ class SlidingEmpiricalObservabilityMatrix:
             raise ValueError('t_sim & u_sim must have same number of rows')
         elif self.x_sim.shape[0] != self.u_sim.shape[0]:
             raise ValueError('x_sim & u_sim must have same number of rows')
+
+        # Set aux inputs
+        if aux_list is None:
+            self.aux_list = [None for k in range(self.N)]
+        else:
+            self.aux_list = aux_list
+
+        if len(self.aux_list) != self.N:
+            raise ValueError('aux_list must have same number of elements as t_sim')
 
         # Set time-window to calculate O's
         if w is None:  # set window size to full time-series size
@@ -292,7 +304,9 @@ class SlidingEmpiricalObservabilityMatrix:
         u_win = self.u_sim[win, :]  # inputs in window
 
         # Calculate O for window
-        EOM = EmpiricalObservabilityMatrix(self.simulator, x0, u_win, eps=self.eps,
+        EOM = EmpiricalObservabilityMatrix(self.simulator, x0, u_win,
+                                           aux=self.aux_list[n],
+                                           eps=self.eps,
                                            parallel=self.parallel_perturbation,
                                            z_function=self.z_function,
                                            z_state_names=self.z_state_names)
