@@ -10,4 +10,4 @@ from .observability import transform_states
 
 from .jacobian import SymbolicJacobian
 
-from .util import colorline
+from .util import colorline, plot_heatmap_log_timeseries
