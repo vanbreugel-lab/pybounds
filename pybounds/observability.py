@@ -329,7 +329,7 @@ class SlidingEmpiricalObservabilityMatrix:
 
 
 class FisherObservability:
-    def __init__(self, O, R=None, lam=None,
+    def __init__(self, O, R=None, lam=None, force_R_scalar=False,
                  states=None, sensors=None, time_steps=None, w=None):
         """ Evaluate the observability of a state variable(s) using the Fisher Information Matrix.
 
@@ -337,12 +337,13 @@ class FisherObservability:
             w is the number of time-steps, p is the number of measurements, and n in the number of states
             can also be set as pd.DataFrame where columns set the state names & a multilevel index sets the
             measurement names: O.index names must be ('sensor', 'time_step')
-        :param None | np.array | float| dict  R: measurement noise covariance matrix (w*p x w*p)
+        :param None | np.array | float | dict  R: measurement noise covariance matrix (w*p x w*p)
             can also be set as pd.DataFrame where R.index = R.columns = O.index
             can also be a scaler where R = R * I_(nxn)
             can also be dict where keys must correspond to the 'sensor' index in O data-frame
             if None, then R = I_(nxn)
         :param float lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
+        :param bool force_R_scalar: force R to be a scalar, useful when the resulting R matrix is too big to fit in memory
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
         :param None | tuple | list | np.array time_steps: array of time steps to use from O's, ex: np.array([0, 1, 2])
@@ -394,13 +395,25 @@ class FisherObservability:
         self.pw = self.O.shape[0]  # number of sensors * time-steps
         self.n = self.O.shape[1]  # number of states
 
-        # Set measurement noise covariance matrix
-        self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-        self.R_inv = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-        self.set_noise_covariance(R=R)
+        # Set measurement noise covariance matrix & calculate Fisher Information Matrix
+        if force_R_scalar and np.isscalar(R):  # scalar R
+            self.R = pd.DataFrame({'R': {'index': float(R)}})
+            self.R_inv = pd.DataFrame({'R_inv': {'index': 1 / self.R.values.squeeze()}})
 
-        # Calculate Fisher Information Matrix
-        self.F = self.O.values.T @ self.R_inv.values @ self.O.values
+            # Calculate Fisher Information Matrix for scalar R
+            self.F = self.R_inv.values.squeeze() * (self.O.values.T @ self.O.values)
+
+        elif force_R_scalar and not np.isscalar(R):
+            raise Exception('R must be a scalar')
+
+        else:  # non-scalar R
+            self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
+            self.R_inv = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
+            self.set_noise_covariance(R=R)
+
+            # Calculate Fisher Information Matrix for non-scalar R
+            self.F = self.O.values.T @ self.R_inv.values.squeeze() @ self.O.values
+
         self.F = pd.DataFrame(self.F, index=self.O.columns, columns=self.O.columns)
 
         # Set sigma
