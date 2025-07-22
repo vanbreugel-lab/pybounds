@@ -619,8 +619,10 @@ class ObservabilityMatrixImage:
 
             # Default sensor names based on data-frame 'sensor' index
             sensor_names_all = list(np.unique(O.index.get_level_values('sensor')))
-            self.sensor_names_default = list(O.index.get_level_values('sensor')[0:len(sensor_names_all)])
-
+            self.sensors = list(O.index.get_level_values('sensor'))
+            self.time_steps = np.array(O.index.get_level_values('time_step'))
+            self.sensor_names_default = self.sensors[0:len(sensor_names_all)]
+            self.time_steps_default = np.unique(self.time_steps)
         else:  # numpy matrix
             raise TypeError('n-sensor must be an integer value when O is given as a numpy matrix')
 
@@ -650,7 +652,7 @@ class ObservabilityMatrixImage:
                 self.measurement_names = []
                 for w in range(self.n_time_step):
                     for p in range(self.n_sensor):
-                        m = '$' + self.sensor_names[p] + ',_{' + 'k=' + str(w) + '}$'
+                        m = '$' + self.sensor_names[p] + ',_{' + 'k=' + str(self.time_steps_default[w]) + '}$'
                         self.measurement_names.append(m)
 
             elif len(sensor_names) == 1:
@@ -659,7 +661,7 @@ class ObservabilityMatrixImage:
                 self.measurement_names = []
                 for w in range(self.n_time_step):
                     for p in range(self.n_sensor):
-                        m = '$' + sensor_names[0] + '_{' + str(p) + ',k=' + str(w) + '}$'
+                        m = '$' + sensor_names[0] + '_{' + str(p) + ',k=' + str(self.time_steps_default[w]) + '}$'
                         self.measurement_names.append(m)
             else:
                 raise TypeError('sensor_names must be of length p or length 1')
@@ -670,7 +672,7 @@ class ObservabilityMatrixImage:
             self.measurement_names = []
             for w in range(self.n_time_step):
                 for p in range(self.n_sensor):
-                    m = '$' + self.sensor_names[p] + '_{' + ',k=' + str(w) + '}$'
+                    m = '$' + self.sensor_names[p] + '_{' + ',k=' + str(self.time_steps_default[w]) + '}$'
                     self.measurement_names.append(m)
 
     def plot(self, vmax_percentile=100, vmin_ratio=0.0, vmax_override=None, cmap='bwr', grid=True, scale=1.0, dpi=150,
