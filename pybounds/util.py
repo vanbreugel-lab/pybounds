@@ -1,4 +1,6 @@
 import numpy as np
+import scipy
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.collections as mcoll
 import matplotlib.patheffects as path_effects
@@ -198,3 +200,80 @@ def colorline(x, y, z, ax=None, cmap=plt.get_cmap('copper'), norm=None, linewidt
     ax.add_collection(lc)
 
     return lc
+
+def plot_heatmap_log_timeseries(data, ax=None, log_ticks=None, data_labels=None,
+                                cmap='inferno_r', y_label=None,
+                                aspect=0.25, interpolation=False):
+    """ Plot log-scale time-series as heatmap.
+    """
+
+    n_label = data.shape[1]
+
+    # Set ticks
+    if log_ticks is None:
+        log_tick_low = int(np.floor(np.log10(np.min(data))))
+        log_tick_high = int(np.ceil(np.log10(np.max(data))))
+    else:
+        log_tick_low = log_ticks[0]
+        log_tick_high = log_ticks[1]
+
+    log_ticks = np.logspace(log_tick_low, log_tick_high, log_tick_high - log_tick_low + 1)
+
+    # Set color normalization
+    cnorm = mpl.colors.LogNorm(10 ** log_tick_low, 10 ** log_tick_high)
+
+    # Set labels
+    if data_labels is None:
+        data_labels = np.arange(0, n_label).tolist()
+        data_labels = [str(x) for x in data_labels]
+
+    # Make figure/axis
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(5 * 1, 4 * 1), dpi=150)
+    else:
+        # ax = plt.gca()
+        fig = plt.gcf()
+
+    # Plot heatmap
+    if interpolation:
+        data = 10**scipy.ndimage.zoom(np.log10(data), (interpolation, 1), order=1)
+        aspect = aspect / interpolation
+
+    ax.imshow(data, norm=cnorm, aspect=aspect, cmap=cmap, interpolation='none')
+
+    # Set axis properties
+    ax.grid(True, axis='x')
+    ax.tick_params(axis='both', which='both', labelsize=6, top=False, labeltop=True, bottom=False, labelbottom=False,
+                   color='gray')
+
+    # Set x-ticks
+    LatexConverter = LatexStates()
+    data_labels_latex = LatexConverter.convert_to_latex(data_labels)
+    ax.set_xticks(np.arange(0, len(data_labels)) - 0.5)
+    ax.set_xticklabels(data_labels_latex)
+
+    # Set labels
+    ax.set_ylabel('time steps', fontsize=7, fontweight='bold')
+    ax.set_xlabel('states', fontsize=7, fontweight='bold')
+    ax.xaxis.set_label_position('top')
+
+    # Set x-ticks
+    xticks = ax.get_xticklabels()
+    for tick in xticks:
+        tick.set_ha('left')
+        tick.set_va('center')
+    #     tick.set_rotation(0)
+    #     tick.set_transform(tick.get_transform() + transforms.ScaledTranslation(6 / 72, 0, ax.figure.dpi_scale_trans))
+
+    # Colorbar
+    if y_label is None:
+        y_label = 'values'
+
+    cax = ax.inset_axes((1.03, 0.0, 0.04, 1.0))
+    cbar = fig.colorbar(mpl.cm.ScalarMappable(norm=cnorm, cmap=cmap), cax=cax, ticks=log_ticks)
+    cbar.set_label(y_label, rotation=270, fontsize=7, labelpad=8)
+    cbar.ax.tick_params(labelsize=6)
+
+    ax.spines[['bottom', 'top', 'left', 'right']].set_color('gray')
+
+    return cnorm, cmap, log_ticks
