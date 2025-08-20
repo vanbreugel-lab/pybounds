@@ -8,7 +8,9 @@ from .util import FixedKeysDict, SetDict
 
 
 class Simulator(object):
-    def __init__(self, f, h, dt=0.01, n=None, m=None,
+    def __init__(self, f, h, dt=0.01,
+                 discrete=False,
+                 n=None, m=None,
                  state_names=None, input_names=None, measurement_names=None,
                  params_simulator=None, mpc_horizon=10):
 
@@ -112,8 +114,12 @@ class Simulator(object):
 
         self.setpoint = FixedKeysDict(self.setpoint)
 
-        # Define continuous-time MPC model
-        self.model = do_mpc.model.Model('continuous')
+        # Define MPC model
+        if discrete:
+            model_type = 'discrete'
+        else:
+            model_type = 'continuous'
+        self.model = do_mpc.model.Model(model_type)
 
         # Define state variables
         X = []
@@ -144,12 +150,17 @@ class Simulator(object):
 
         # Set simulation parameters
         if params_simulator is None:
-            self.params_simulator = {
-                'integration_tool': 'idas',  # cvodes, idas
-                'abstol': 1e-8,
-                'reltol': 1e-8,
-                't_step': self.dt
-            }
+            if self.model.model_type == 'continuous':
+                self.params_simulator = {
+                    'integration_tool': 'idas',  # cvodes, idas
+                    'abstol': 1e-8,
+                    'reltol': 1e-8,
+                    't_step': self.dt
+                }
+            else:
+                self.params_simulator = {
+                    't_step': self.dt
+                }
         else:
             self.params_simulator = params_simulator
 
