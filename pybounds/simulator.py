@@ -264,6 +264,15 @@ class Simulator(object):
         if data is not None:  # data given
             if isinstance(data, dict):  # in dict format
                 SetDict().set_dict_with_overwrite(update, data)  # update only the inputs in the dict given
+
+                # Normalize unset keys to be the length of the set keys be repeating the 1st element
+                unset_key = set(update.keys()) - set(data.keys())  # find keys that were not set
+                set_key = set(data.keys())  # find keys that were set
+                if unset_key != set_key:
+                    w = data[list(set_key)[0]].squeeze().shape[0]  # size of 1st set key
+                    for k in unset_key:  # update each unset key
+                        update[k] = update[k][0] * np.ones(w)
+
             elif isinstance(data, list) or isinstance(data, tuple):  # list or tuple format, each input vector in each element
                 for n, k in enumerate(update.keys()):  # each state
                     update[k] = data[n]
