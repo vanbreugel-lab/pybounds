@@ -340,6 +340,9 @@ class Simulator(object):
         x = np.nan * np.zeros((self.w, self.n))
         x[0, :] = x_step.copy()
 
+        # Set array to store simulated measurements
+        y = np.nan * np.zeros((self.w, self.p))
+
         # Initialize the simulator
         # self.simulator = do_mpc.simulator.Simulator(self.model)
         # self.simulator.set_param(**self.params_simulator)
@@ -366,18 +369,27 @@ class Simulator(object):
             else:  # use inputs directly
                 u_step = u_sim[k - 1:k, :].T
 
-            # Store inputs
-            u_sim[k - 1, :] = u_step.squeeze()
-
             # Simulate one time step given current inputs
             x_step = self.simulator.make_step(u_step)
 
-            # Store new states
+            # Calculate current measurements
+            y_step = np.array(self.h(x_step, u_step))
+
+            # Store inputs
+            u_sim[k - 1, :] = u_step.squeeze()
+
+            # Store state
             x[k, :] = x_step.squeeze()
+
+            # Store measurements
+            y[k, :] = y_step.squeeze()
 
         # Last input has no effect, so keep it the same as previous time-step
         if mpc:
             u_sim[-1, :] = u_sim[-2, :]
+
+        # First measurement
+        y[0, :] = self.h(x[0, :], u_sim[0, :])
 
         # Update the inputs
         self.update_dict(u_sim, name='u')
@@ -385,12 +397,7 @@ class Simulator(object):
         # Update state trajectory
         self.update_dict(x, name='x')
 
-        # Calculate measurements
-        x_list = list(self.x.values())
-        u_list = list(self.u.values())
-        y = self.h(x_list, u_list)
-
-        # Set measurements
+        # Update measurements
         self.update_dict(y, name='y')
 
         # Return the measurements in array format
