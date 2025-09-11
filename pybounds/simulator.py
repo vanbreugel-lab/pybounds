@@ -1,5 +1,6 @@
 
 import warnings
+from functools import wraps
 import numpy as np
 import matplotlib.pyplot as plt
 import casadi
@@ -28,7 +29,7 @@ class Simulator(object):
         """
 
         self.f = f
-        self.h = h
+        self.h = ensure_float_output(h)
         self.dt = dt
 
         # Set state names
@@ -373,7 +374,7 @@ class Simulator(object):
             x_step = self.simulator.make_step(u_step)
 
             # Calculate current measurements
-            y_step = np.array(self.h(x_step, u_step))
+            y_step = self.h(x_step, u_step)
 
             # Store inputs
             u_sim[k - 1, :] = u_step.squeeze()
@@ -466,3 +467,12 @@ class Simulator(object):
 
         for a in ax.flat:
             a.tick_params(axis='both', labelsize=6)
+
+
+def ensure_float_output(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        output = func(*args, **kwargs)
+        return np.array([float(e) for e in output])
+    return wrapper
+
