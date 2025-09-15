@@ -46,8 +46,8 @@ class Simulator(object):
 
             self.state_names = list(state_names)
             self.n = len(self.state_names)
-            # if len(self.state_names) != self.n:
-            #     raise ValueError('state_names must have length equal to x0')
+            if len(self.state_names) != self.n:
+                raise ValueError('state_names must have length equal to x0')
 
         # Set input names
         if input_names is None:  # default input names
@@ -63,8 +63,8 @@ class Simulator(object):
 
             self.input_names = list(input_names)
             self.m = len(self.input_names)
-            # if len(self.input_names) != self.m:
-            #     raise ValueError('input_names must have length equal to u0')
+            if len(self.input_names) != self.m:
+                raise ValueError('input_names must have length equal to u0')
 
         # Run measurement function to get measurement size
         x0 = np.ones(self.n)
@@ -475,4 +475,3 @@ def ensure_float_output(func):
         output = func(*args, **kwargs)
         return np.array([float(e) for e in output])
     return wrapper
-
