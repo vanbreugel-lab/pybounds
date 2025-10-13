@@ -383,14 +383,14 @@ class Simulator(object):
             x[k, :] = x_step.squeeze()
 
             # Store measurements
-            y[k, :] = y_step.squeeze()
+            y[k - 1, :] = y_step.squeeze()
 
         # Last input has no effect, so keep it the same as previous time-step
         if mpc:
             u_sim[-1, :] = u_sim[-2, :]
 
-        # First measurement
-        y[0, :] = self.h(x[0, :], u_sim[0, :])
+        # Last measurement
+        y[-1, :] = self.h(x[-1, :], u_sim[-1, :])
 
         # Update the inputs
         self.update_dict(u_sim, name='u')
