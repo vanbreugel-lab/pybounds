@@ -370,11 +370,11 @@ class Simulator(object):
             else:  # use inputs directly
                 u_step = u_sim[k - 1:k, :].T
 
-            # Simulate one time step given current inputs
-            x_step = self.simulator.make_step(u_step)
-
             # Calculate current measurements
             y_step = self.h(x_step, u_step)
+
+            # Simulate one time step given current inputs
+            x_step = self.simulator.make_step(u_step)
 
             # Store inputs
             u_sim[k - 1, :] = u_step.squeeze()
