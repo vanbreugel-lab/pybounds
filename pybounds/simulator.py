@@ -69,7 +69,7 @@ class Simulator(object):
         # Run measurement function to get measurement size
         x0 = np.ones(self.n)
         u0 = np.ones(self.m)
-        y = self.h(x0, u0)
+        y = self.h(np.ravel(x0), np.ravel(u0))
         self.p = len(y)  # number of measurements
 
         # Set measurement names
@@ -371,7 +371,7 @@ class Simulator(object):
                 u_step = u_sim[k - 1:k, :].T
 
             # Calculate current measurements
-            y_step = self.h(x_step, u_step)
+            y_step = self.h(np.ravel(x_step), np.ravel(u_step))
 
             # Simulate one time step given current inputs
             x_step = self.simulator.make_step(u_step)
@@ -390,7 +390,7 @@ class Simulator(object):
             u_sim[-1, :] = u_sim[-2, :]
 
         # Last measurement
-        y[-1, :] = self.h(x[-1, :], u_sim[-1, :])
+        y[-1, :] = self.h(np.ravel(x[-1, :]), np.ravel(u_sim[-1, :]))
 
         # Update the inputs
         self.update_dict(u_sim, name='u')
