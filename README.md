@@ -26,8 +26,8 @@ pip install pybounds
 ## Notebook examples
 
 For a simple system:
-*  Monocular camera with optic fow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb)
+*  Monocular camera with optic fow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb). <a href="[Open in Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb)" target="_blank">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
 
 For a more complex system:
 *  Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)
