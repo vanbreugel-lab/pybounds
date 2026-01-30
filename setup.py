@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pybounds",
-    version="0.0.13",
+    version="0.0.14",
     author="Ben Cellini, Burak Boyacioglu, Floris van Breugel",
     author_email="bcellini00@gmail.com",
     description="Bounding Observability for Uncertain Nonlinear Dynamics Systems (BOUNDS)",
