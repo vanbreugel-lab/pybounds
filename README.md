@@ -12,7 +12,7 @@ Python implementation of BOUNDS: Bounding Observability for Uncertain Nonlinear 
 This repository provides python code to empirically calculate the observability level of individual states for a nonlinear (partially observable) system, and accounts for sensor noise. Below is a graphical example of how pybounds can discover active sensing motifs. Minimal working examples are described below. 
 
 
-<img src="graphics/pybounds_overview.png" width="300">
+<img src="graphics/pybounds_overview.png" width="600">
 
 ## Installing
 
