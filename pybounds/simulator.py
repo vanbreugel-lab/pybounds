@@ -210,7 +210,9 @@ class Simulator(object):
         mpc_horizon = self.mpc._settings.n_horizon
 
         # Set current step index
-        k_step = int(np.round(t / self.dt))
+        t_s = float(np.asarray(t).squeeze())
+        dt_s = float(np.asarray(self.dt).squeeze())
+        k_step = int(np.rint(t_s / dt_s))
         if k_step >= mpc_horizon:  # point is beyond end of input data
             k_step = mpc_horizon - 1  # set point beyond input data to last point
 
@@ -227,7 +229,9 @@ class Simulator(object):
         mpc_horizon = self.mpc._settings.n_horizon
 
         # Set current step index
-        k_step = int(np.round(t / self.dt))
+        t_s = float(np.asarray(t).squeeze())
+        dt_s = float(np.asarray(self.dt).squeeze())
+        k_step = int(np.rint(t_s / dt_s))
 
         # Update set-point time horizon
         for k in range(mpc_horizon + 1):
