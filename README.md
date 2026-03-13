@@ -9,18 +9,22 @@ Python implementation of BOUNDS: Bounding Observability for Uncertain Nonlinear 
 
 ## Introduction
 
-This repository provides python code to empirically calculate the observability level of individual states for a nonlinear (partially observable) system, and accounts for sensor noise. Below is a graphical example of how pybounds can discover active sensing motifs. Minimal working examples are described below. 
-
+This repository provides python code to empirically calculate the observability level of individual states for a nonlinear (partially observable) system, and accounts for sensor noise. Below is a graphical example of how pybounds can discover active sensing motifs. Minimal working examples are described below.
 
 <img src="graphics/pybounds_overview.png" width="600">
 
 ## Installing
 
-The package can be installed by cloning the repo and running python setup.py install from inside the home pybounds directory.
+The package can be installed from PyPi:
 
-Alternatively using pip
 ```bash
 pip install pybounds
+```
+
+or from source, for development, after cloning the repo:
+
+```
+pip install -e .
 ```
 
 ## Notebook examples
@@ -43,7 +47,6 @@ To learn more about nonlinear observability, its relation to Fisher information,
 
 To start with the basics, check out these open source course materials: [Nonlinear and Data Driven Estimation](https://github.com/florisvb/Nonlinear_and_Data_Driven_Estimation).
 
-
 ## Related packages
 
 This repository is the evolution of the EISO repo (https://github.com/BenCellini/EISO), and is intended as a companion to the repository directly associated with the paper above.
@@ -51,4 +54,4 @@ This repository is the evolution of the EISO repo (https://github.com/BenCellini
 ## License
 
 This project utilizes the [MIT LICENSE](LICENSE.txt).
-100% open-source, feel free to utilize the code however you like. 
+100% open-source, feel free to utilize the code however you like.
