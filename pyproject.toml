@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75.1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pybounds"
+version = "0.1.0"
+authors = [
+    { name = "Ben Cellini", email = "bcellini00@gmail.com" },
+    { name = "Burak Boyacioglu" },
+    { name = "Floris van Breugel" },
+]
+description = "Bounding Observability for Uncertain Nonlinear Dynamics Systems (BOUNDS)"
+readme = "README.md"
+requires-python = ">=3.0"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "do_mpc>=4.6.5",
+    "matplotlib>=3.10.3",
+    "numpy>=2.3.1",
+    "pandas>=1.4.3",
+    "scipy>=1.16.0",
+    "sympy>=1.13.0",
+    "casadi",
+]
+
+[project.urls]
+homepage = "https://pypi.org/project/pybounds/"
+source = "https://github.com/vanbreugel-lab/pybounds"
+download = "https://pypi.org/project/pybounds/#files"
+tracker = "https://github.com/vanbreugel-lab/pybounds/issues"
+
+[tool.setuptools]
+packages = ["pybounds"]
