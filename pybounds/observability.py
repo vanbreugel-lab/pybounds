@@ -5,9 +5,50 @@ import warnings
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 from .util import LatexStates
 from .jacobian import SymbolicJacobian
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for process-based parallel sliding window computation.
+# Must live at module scope so they are picklable by multiprocessing.
+# ---------------------------------------------------------------------------
+
+# Per-process Simulator instance (set in pool initialiser).
+_process_simulator = None
+
+
+def _pool_initializer(factory):
+    """Create one Simulator per worker process."""
+    global _process_simulator
+    _process_simulator = factory()
+
+
+def _compute_window(args):
+    """Compute EmpiricalObservabilityMatrix for a single window (called in worker)."""
+    global _process_simulator
+    n, O_index, x_sim, u_sim, t_sim, N, w, eps, aux_list, z_function, z_state_names = args
+
+    x0 = np.squeeze(x_sim[O_index[n], :])
+    win = np.arange(O_index[n], O_index[n] + w, step=1)
+    win = win[win < N]
+    t_win = t_sim[win]
+    u_win = u_sim[win, :]
+
+    EOM = EmpiricalObservabilityMatrix(_process_simulator, x0, u_win,
+                                       aux=aux_list[n], eps=eps,
+                                       parallel=False,
+                                       z_function=z_function,
+                                       z_state_names=z_state_names)
+    window_data = {
+        't': t_win.copy(), 'u': u_win.copy(),
+        'y': EOM.y_nominal.copy(),
+        'y_plus': EOM.y_plus.copy(),
+        'y_minus': EOM.y_minus.copy(),
+    }
+    return EOM.O.copy(), EOM.O_df.copy(), window_data
 
 
 class EmpiricalObservabilityMatrix:
@@ -172,6 +213,7 @@ class EmpiricalObservabilityMatrix:
 class SlidingEmpiricalObservabilityMatrix:
     def __init__(self, simulator, t_sim, x_sim, u_sim, aux_list=None, w=None, eps=1e-5,
                  parallel_sliding=False, parallel_perturbation=False,
+                 simulator_factory=None, n_workers=None,
                  z_function=None, z_state_names=None):
         """ Construct empirical observability matrix O in sliding windows along a trajectory.
 
@@ -184,14 +226,33 @@ class SlidingEmpiricalObservabilityMatrix:
         :param np.array w: window size for O calculations, will automatically set how many windows to compute
         :params float eps: tolerance for sliding windows
         :param float eps: epsilon value for perturbations to construct O's, should be small number
-        :param bool parallel_sliding: if True, run the sliding windows in parallel
-        :param bool parallel_perturbation: if True, run the perturbations in parallel
+        :param bool parallel_sliding: if True, run the sliding windows in parallel using processes.
+            Requires ``simulator_factory`` when parallel_sliding=True (see below).
+            Falls back to ThreadPoolExecutor (unsafe with CasADi) when no factory is provided.
+        :param bool parallel_perturbation: if True, run the perturbations in parallel (thread-based,
+            only safe when the simulator's simulate() is thread-safe).
+        :param callable simulator_factory: zero-argument callable that returns a fresh Simulator.
+            Required for correct process-based parallelism (``parallel_sliding=True``).
+            Each worker process will call factory() once to create its own Simulator instance,
+            avoiding the thread-safety issues of CasADi/IDAS.  Example::
+
+                def make_sim():
+                    return pybounds.Simulator(dynamics_f, h, dt=0.01,
+                                             state_names=['g', 'd'], ...)
+
+                SEOM = SlidingEmpiricalObservabilityMatrix(
+                    simulator, ..., parallel_sliding=True, simulator_factory=make_sim)
+
+        :param int n_workers: number of worker processes for process-based parallelism.
+            Defaults to min(n_windows, os.cpu_count()).
         """
 
         self.simulator = simulator
         self.eps = eps
         self.parallel_sliding = parallel_sliding
         self.parallel_perturbation = parallel_perturbation
+        self.simulator_factory = simulator_factory
+        self.n_workers = n_workers
         self.z_function = z_function
         self.z_state_names = z_state_names
 
@@ -266,12 +327,41 @@ class SlidingEmpiricalObservabilityMatrix:
 
         # Construct O's
         n_point_range = np.arange(0, self.n_point).astype(int)
-        if self.parallel_sliding:  # multiprocessing
-            # with Pool(4) as pool:
-            #     results = pool.map(self.construct, n_point_range)
+        if self.parallel_sliding:
+            if self.simulator_factory is not None:
+                # ---- Process-based parallelism (safe with CasADi/IDAS) ----
+                # Each worker process gets its own Simulator via the factory.
+                import os
+                n_workers = self.n_workers or min(self.n_point, os.cpu_count() or 1)
+                args_list = [
+                    (n, self.O_index, self.x_sim, self.u_sim, self.t_sim,
+                     self.N, self.w, self.eps, self.aux_list,
+                     self.z_function, self.z_state_names)
+                    for n in n_point_range
+                ]
+                ctx = multiprocessing.get_context('spawn')
+                with ctx.Pool(processes=n_workers,
+                              initializer=_pool_initializer,
+                              initargs=(self.simulator_factory,)) as pool:
+                    results = pool.map(_compute_window, args_list)
 
-            with ThreadPoolExecutor(max_workers=12) as executor:
-                results = list(executor.map(self.construct, n_point_range))
+                for r in results:
+                    self.O_sliding.append(r[0])
+                    self.O_df_sliding.append(r[1])
+                    for k in self.window_data.keys():
+                        self.window_data[k].append(r[2][k])
+
+            else:
+                # ---- Thread-based parallelism (legacy, unsafe with CasADi) ----
+                # Kept for backwards compatibility; raises a warning about thread safety.
+                warnings.warn(
+                    'parallel_sliding=True without simulator_factory uses ThreadPoolExecutor, '
+                    'which is NOT thread-safe with CasADi/IDAS and may crash or produce '
+                    'incorrect results.  Pass simulator_factory=<callable> to use safe '
+                    'process-based parallelism instead.',
+                    RuntimeWarning, stacklevel=2)
+                with ThreadPoolExecutor(max_workers=12) as executor:
+                    results = list(executor.map(self.construct, n_point_range))
 
                 for r in results:
                     self.O_sliding.append(r[0])

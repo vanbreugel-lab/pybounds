@@ -4,6 +4,7 @@ Diagnostic test that generates a PDF report with:
   - Page 2: Pipeline timing summary
   - Page 3: Observability over time for states g and d (replicates the
             final plot from examples/mono_camera_example.ipynb)
+  - Page 4: Parallel vs serial benchmark for SlidingEmpiricalObservabilityMatrix
 
 Run with:  pytest tests/test_diagnostic_pdf.py -v -s
 Output:    tests/diagnostic_report.pdf
@@ -23,6 +24,14 @@ import pybounds
 from pybounds import colorline, SlidingEmpiricalObservabilityMatrix, SlidingFisherObservability
 
 PDF_PATH = 'tests/diagnostic_report.pdf'
+
+# Module-level factory for process-based parallel benchmark (must be picklable).
+def _make_diagnostic_simulator():
+    """Create a fresh Simulator for the mono-camera system (used by parallel workers)."""
+    from conftest import dynamics_f, measurement_h
+    return pybounds.Simulator(dynamics_f, measurement_h, dt=0.01,
+                              state_names=['g', 'd'], input_names=['u'],
+                              measurement_names=['r'])
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +227,82 @@ def _make_observability_page(pdf, t_sim, x_sim, EV_no_nan, states):
 
 
 # ---------------------------------------------------------------------------
+# Helper: parallel benchmark page
+# ---------------------------------------------------------------------------
+
+def _make_benchmark_page(pdf, serial_time, parallel_time, n_windows,
+                         results_match, max_abs_diff, n_threads,
+                         parallel_crashed=False):
+    """Bar chart comparing serial vs parallel SEOM wall-clock time."""
+    fig = plt.figure(figsize=(8.5, 11))
+
+    fig.text(0.08, 0.96, 'Parallel vs Serial Benchmark',
+             fontsize=16, fontweight='bold', va='top')
+    fig.text(0.08, 0.92,
+             f'SlidingEmpiricalObservabilityMatrix  |  {n_windows} windows  '
+             f'|  parallel_sliding=True  |  simulator_factory=<callable>  '
+             f'|  n_workers={n_threads} (multiprocessing.Pool, spawn)',
+             fontsize=9, va='top', color='#444444', wrap=True)
+
+    speedup = serial_time / parallel_time if parallel_time > 0 else float('nan')
+    correctness_color = '#2ca02c' if results_match else '#d62728'
+    if parallel_crashed:
+        correctness_label = 'CRASH — CasADi/IDAS fatal signal (not thread-safe)'
+    elif results_match:
+        correctness_label = 'PASS — results match serial'
+    else:
+        correctness_label = f'FAIL — max |diff| = {max_abs_diff:.2e}'
+
+    # --- bar chart ---
+    ax = fig.add_axes([0.25, 0.68, 0.50, 0.18])
+    bars = ax.barh(['parallel', 'serial'], [parallel_time, serial_time],
+                   color=['#1f77b4', '#ff7f0e'])
+    ax.set_xlabel('Wall-clock time (s)', fontsize=10)
+    ax.tick_params(labelsize=9)
+    ax.spines[['top', 'right']].set_visible(False)
+    for bar, val in zip(bars, [parallel_time, serial_time]):
+        ax.text(bar.get_width() + max(serial_time, parallel_time) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f'{val:.3f} s', va='center', fontsize=9)
+
+    # --- summary text ---
+    summary_y = 0.60
+    lines = [
+        ('Serial time',    f'{serial_time:.3f} s'),
+        ('Parallel time',  f'{parallel_time:.3f} s'),
+        ('Speedup',        f'{speedup:.2f}×'),
+        ('Correctness',    correctness_label),
+    ]
+    for label, value in lines:
+        fig.text(0.10, summary_y, label + ':', fontsize=11, fontweight='bold', va='top')
+        color = correctness_color if label == 'Correctness' else 'black'
+        fig.text(0.38, summary_y, value, fontsize=11, va='top', color=color)
+        summary_y -= 0.055
+
+    # --- notes ---
+    notes_y = 0.36
+    fig.text(0.08, notes_y, 'Notes', fontsize=12, fontweight='bold', va='top')
+    notes_y -= 0.04
+    note_lines = [
+        '• Simulator.simulate() mutates shared state (self.simulator, self.x, …) on each call.',
+        '  CasADi/IDAS is NOT thread-safe: ThreadPoolExecutor causes fatal crashes.',
+        '• The new simulator_factory parameter passes a zero-arg callable to SEOM.',
+        '  Each worker process calls factory() once to get its own Simulator.',
+        '  This eliminates all shared state between workers.',
+        '• Uses multiprocessing.Pool with start method "spawn" (macOS/Windows default).',
+        '  "spawn" avoids fork-safety issues with CasADi shared libraries.',
+        '• Each worker incurs ~0.02 s Simulator setup overhead (one-time, amortized',
+        '  across all windows assigned to that worker).',
+    ]
+    for line in note_lines:
+        fig.text(0.08, notes_y, line, fontsize=9, va='top', color='#333333')
+        notes_y -= 0.032
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Timing context manager
 # ---------------------------------------------------------------------------
 
@@ -305,21 +390,47 @@ def test_generate_diagnostic_pdf(simulator):
                         duration=t.duration,
                         description='get_minimum_error_variance() + NaN fill'))
 
-    # --- Step 6: Plot generation ---
+    # --- Step 6: Time the plot generation using an in-memory buffer ---
+    import io
     with _Timer() as t:
-        with PdfPages(PDF_PATH) as pdf:
-            _make_equations_page(pdf)
-            _make_timing_page(pdf, timings, n_steps, n_windows)
-            _make_observability_page(pdf, t_sim, x_sim, EV_no_nan, o_states)
+        buf = io.BytesIO()
+        with PdfPages(buf) as pdf_buf:
+            _make_equations_page(pdf_buf)
+            _make_timing_page(pdf_buf, timings, n_steps, n_windows)
+            _make_observability_page(pdf_buf, t_sim, x_sim, EV_no_nan, o_states)
     timings.append(dict(label='PDF generation',
                         duration=t.duration,
                         description='Render equations page, timing page, observability plot'))
 
-    # --- Re-write PDF now that we have the plot timing too ---
+    # --- Step 7: Parallel SEOM benchmark (process-based, safe with CasADi) ---
+    import os
+    N_WORKERS = min(n_windows, os.cpu_count() or 4)
+    with _Timer() as t_par:
+        SEOM_par = SlidingEmpiricalObservabilityMatrix(
+            simulator, t_sim, x_sim, u_sim, w=w, eps=1e-4,
+            parallel_sliding=True, simulator_factory=_make_diagnostic_simulator,
+            n_workers=N_WORKERS)
+
+    # Correctness check: compare every window's O matrix against serial result
+    serial_stack = np.vstack([o for o in SEOM.O_sliding])
+    parallel_stack = np.vstack([o for o in SEOM_par.O_sliding])
+    max_abs_diff = float(np.max(np.abs(serial_stack - parallel_stack)))
+    results_match = max_abs_diff < 1e-6
+    parallel_crashed = False
+
+    # --- Re-write PDF now that we have the plot timing + benchmark ---
     with PdfPages(PDF_PATH) as pdf:
         _make_equations_page(pdf)
         _make_timing_page(pdf, timings, n_steps, n_windows)
         _make_observability_page(pdf, t_sim, x_sim, EV_no_nan, o_states)
+        _make_benchmark_page(pdf,
+                             serial_time=timings[2]['duration'],
+                             parallel_time=t_par.duration,
+                             n_windows=n_windows,
+                             results_match=results_match,
+                             max_abs_diff=max_abs_diff,
+                             n_threads=N_WORKERS,
+                             parallel_crashed=parallel_crashed)
 
     assert os.path.exists(PDF_PATH), f"PDF not created at {PDF_PATH}"
     assert os.path.getsize(PDF_PATH) > 1000, "PDF appears empty"
@@ -334,5 +445,22 @@ def test_generate_diagnostic_pdf(simulator):
               f"({100 * t['duration'] / total:.1f}%)")
     print(f"{'─' * 60}")
     print(f"  {'TOTAL':<25} {total:>7.3f} s")
+    print(f"{'─' * 60}")
+
+    # Print parallel benchmark results
+    serial_eom_time = timings[2]['duration']
+    speedup = serial_eom_time / t_par.duration if t_par.duration > 0 else float('nan')
+    print(f"\n{'─' * 60}")
+    print(f"  Parallel SEOM benchmark (parallel_sliding=True, process-based)")
+    print(f"{'─' * 60}")
+    print(f"  {'Workers':<25} {N_WORKERS}")
+    print(f"  {'Serial SEOM':<25} {serial_eom_time:>7.3f} s")
+    print(f"  {'Parallel SEOM':<25} {t_par.duration:>7.3f} s")
+    print(f"  {'Speedup':<25} {speedup:>7.2f}×")
+    if parallel_crashed:
+        print(f"  {'Status':<25} CRASH — CasADi/IDAS fatal signal (not thread-safe)")
+    else:
+        print(f"  {'Max |diff|':<25} {max_abs_diff:.2e}  "
+              f"({'PASS' if results_match else 'FAIL — race condition detected'})")
     print(f"{'─' * 60}")
     print(f"\n  Diagnostic PDF saved to: {PDF_PATH}")
