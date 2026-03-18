@@ -5,6 +5,7 @@ Diagnostic test that generates a PDF report with:
   - Page 3: Observability over time for states g and d (replicates the
             final plot from examples/mono_camera_example.ipynb)
   - Page 4: Parallel vs serial benchmark for SlidingEmpiricalObservabilityMatrix
+  - Page 5: JAX autodiff vs. legacy numerical observability comparison
 
 Run with:  pytest tests/test_diagnostic_pdf.py -v -s
 Output:    tests/diagnostic_report.pdf
@@ -24,6 +25,25 @@ import pybounds
 from pybounds import colorline, SlidingEmpiricalObservabilityMatrix, SlidingFisherObservability
 
 PDF_PATH = 'tests/diagnostic_report.pdf'
+
+# ---------------------------------------------------------------------------
+# JAX-compatible dynamics and measurement for the mono-camera system.
+# These are module-level so they are picklable and JAX-traceable.
+# ---------------------------------------------------------------------------
+try:
+    import jax.numpy as jnp
+    from pybounds import JaxSimulator, JaxEmpiricalObservabilityMatrix
+
+    def _dynamics_f_jax(x, u):
+        return jnp.array([u[0], 0.0 * u[0]])
+
+    def _measurement_h_jax(x, u):
+        return jnp.array([x[0] / x[1]])
+
+    _JAX_AVAILABLE = True
+except ImportError:
+    _JAX_AVAILABLE = False
+
 
 # Module-level factory for process-based parallel benchmark (must be picklable).
 def _make_diagnostic_simulator():
@@ -306,6 +326,101 @@ def _make_benchmark_page(pdf, serial_time, parallel_time, n_windows,
 # Timing context manager
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Helper: JAX vs legacy comparison page
+# ---------------------------------------------------------------------------
+
+def _make_jax_comparison_page(pdf, t_sim_full, y_legacy_full, y_jax_full,
+                               O_legacy, O_jax, timing_rows):
+    """Page comparing JAX autodiff against legacy numerical observability.
+
+    Layout (3 rows × 2 cols):
+      Row 1: y-trajectory overlay (left) | residual |y_jax - y_legacy| (right)
+      Row 2: O matrix heatmap legacy (left) | O matrix heatmap JAX (right)
+      Row 3: Timing table (spans both columns)
+    """
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.text(0.08, 0.97, 'JAX Autodiff vs Legacy Numerical Observability',
+             fontsize=14, fontweight='bold', va='top')
+    fig.text(0.08, 0.94,
+             'Mono-camera system  |  RK4 integrator  |  jacfwd Jacobian vs ±ε perturbations',
+             fontsize=9, va='top', color='#444444')
+
+    # ---- Row 1: simulation trajectories ----
+    ax_y = fig.add_axes([0.08, 0.73, 0.38, 0.17])
+    ax_r = fig.add_axes([0.56, 0.73, 0.38, 0.17])
+
+    ax_y.plot(t_sim_full, y_legacy_full.ravel(), color='#1f77b4',
+              linewidth=1.5, label='do_mpc (IDAS)')
+    ax_y.plot(t_sim_full, y_jax_full.ravel(), color='#ff7f0e',
+              linewidth=1.2, linestyle='--', label='JAX RK4')
+    ax_y.set_ylabel('y = g/d (optic flow)', fontsize=7)
+    ax_y.set_xlabel('time (s)', fontsize=7)
+    ax_y.tick_params(labelsize=6)
+    ax_y.legend(fontsize=6, loc='upper right')
+    ax_y.set_title('Simulation output: y trajectory', fontsize=8, fontweight='bold')
+    ax_y.spines[['top', 'right']].set_visible(False)
+
+    residual = np.abs(y_jax_full.ravel() - y_legacy_full.ravel())
+    ax_r.semilogy(t_sim_full, residual + 1e-20, color='#d62728', linewidth=1.2)
+    ax_r.set_ylabel('|y_JAX − y_legacy|', fontsize=7)
+    ax_r.set_xlabel('time (s)', fontsize=7)
+    ax_r.tick_params(labelsize=6)
+    ax_r.set_title('Residual (log scale)', fontsize=8, fontweight='bold')
+    ax_r.spines[['top', 'right']].set_visible(False)
+
+    # ---- Row 2: O matrix heatmaps ----
+    for col, (O_mat, title) in enumerate([(O_legacy, 'O legacy (numerical ±ε)'),
+                                          (O_jax,    'O JAX (autodiff jacfwd)')]):
+        left = 0.08 + col * 0.48
+        ax_o = fig.add_axes([left, 0.42, 0.38, 0.22])
+        vmax = np.max(np.abs(O_mat)) or 1.0
+        im = ax_o.imshow(O_mat, aspect='auto', cmap='bwr',
+                         vmin=-vmax, vmax=vmax)
+        ax_o.set_title(title, fontsize=8, fontweight='bold')
+        ax_o.set_xlabel('State (g, d)', fontsize=7)
+        ax_o.set_ylabel('Sensor × time-step', fontsize=7)
+        ax_o.set_xticks([0, 1])
+        ax_o.set_xticklabels(['g', 'd'], fontsize=7)
+        ax_o.tick_params(axis='y', labelsize=5)
+        fig.colorbar(im, ax=ax_o, fraction=0.046, pad=0.04).ax.tick_params(labelsize=6)
+
+    # Difference heatmap between O_jax and O_legacy
+    ax_diff = fig.add_axes([0.08, 0.28, 0.84, 0.10])
+    diff = O_jax - O_legacy
+    vmax_d = max(np.max(np.abs(diff)), 1e-12)
+    im_d = ax_diff.imshow(diff.T, aspect='auto', cmap='bwr',
+                          vmin=-vmax_d, vmax=vmax_d)
+    ax_diff.set_title(f'O_JAX − O_legacy  (max |diff| = {vmax_d:.2e})',
+                      fontsize=8, fontweight='bold')
+    ax_diff.set_xlabel('Sensor × time-step', fontsize=7)
+    ax_diff.set_yticks([0, 1])
+    ax_diff.set_yticklabels(['g', 'd'], fontsize=7)
+    ax_diff.tick_params(axis='x', labelsize=5)
+    fig.colorbar(im_d, ax=ax_diff, fraction=0.02, pad=0.01).ax.tick_params(labelsize=6)
+
+    # ---- Row 3: timing table ----
+    ax_t = fig.add_axes([0.05, 0.02, 0.90, 0.22])
+    ax_t.axis('off')
+    col_widths = [0.35, 0.13, 0.13, 0.39]
+    tbl = ax_t.table(
+        cellText=timing_rows,
+        colLabels=['Step', 'Time (s)', 'Speedup vs legacy', 'Notes'],
+        colWidths=col_widths,
+        cellLoc='left',
+        loc='upper left',
+        bbox=[0, 0, 1, 1],
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    for col in range(4):
+        tbl[0, col].set_facecolor('#2c5f8a')
+        tbl[0, col].set_text_props(color='white', fontweight='bold')
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 class _Timer:
     def __init__(self):
         self.start = None
@@ -418,7 +533,92 @@ def test_generate_diagnostic_pdf(simulator):
     results_match = max_abs_diff < 1e-6
     parallel_crashed = False
 
-    # --- Re-write PDF now that we have the plot timing + benchmark ---
+    # --- Step 8: JAX autodiff comparison (single window) ---
+    jax_timing_rows = []
+    jax_page_data = None
+
+    if _JAX_AVAILABLE:
+        jax_sim = JaxSimulator(
+            _dynamics_f_jax, _measurement_h_jax, dt=dt,
+            state_names=['g', 'd'], input_names=['u'], measurement_names=['r'])
+
+        # Time JAX forward simulation (full trajectory, first call = JIT warmup)
+        x0_arr = np.array([2.0, 3.0])
+        u_arr_full = np.column_stack([np.hstack((u1, u2, u3))])
+        with _Timer() as t_jax_sim_warm:
+            y_jax_full = jax_sim.simulate(x0_arr, u_arr_full)
+        with _Timer() as t_jax_sim_hot:
+            y_jax_full = jax_sim.simulate(x0_arr, u_arr_full)
+
+        # Legacy y for full trajectory: r = g/d
+        y_legacy_full = (np.asarray(x_sim['g']) / np.asarray(x_sim['d']))[:, None]  # (n_steps, 1)
+
+        # Pick first window for O matrix comparison
+        win_x0 = np.array([x_sim['g'][0], x_sim['d'][0]])
+        win_u = np.column_stack([u_sim['u'][:w]])
+
+        # Legacy O (first window, already computed inside SEOM)
+        O_legacy_win = SEOM.O_sliding[0]
+
+        # JAX O (first call = JIT warmup, second call = hot)
+        with _Timer() as t_jax_eom_warm:
+            eom_jax = JaxEmpiricalObservabilityMatrix(jax_sim, win_x0, win_u)
+        with _Timer() as t_jax_eom_hot:
+            eom_jax = JaxEmpiricalObservabilityMatrix(jax_sim, win_x0, win_u)
+
+        O_jax_win = eom_jax.O
+        O_diff_max = float(np.max(np.abs(O_jax_win - O_legacy_win)))
+
+        # Legacy single-window O timing: total SEOM / n_windows
+        t_legacy_win = timings[2]['duration'] / n_windows
+
+        def _speedup(ref, val):
+            return f"{ref / val:.1f}×" if val > 0 else "—"
+
+        jax_timing_rows = [
+            ['do_mpc simulate (full traj)',
+             f'{timings[1]["duration"]:.3f}', '1.0× (baseline)',
+             f'{n_steps} steps, IDAS solver'],
+            ['JAX RK4 simulate (JIT warmup)',
+             f'{t_jax_sim_warm.duration:.3f}',
+             _speedup(timings[1]['duration'], t_jax_sim_warm.duration),
+             'First call: traces + compiles XLA kernel'],
+            ['JAX RK4 simulate (hot)',
+             f'{t_jax_sim_hot.duration:.4f}',
+             _speedup(timings[1]['duration'], t_jax_sim_hot.duration),
+             'Subsequent calls: runs compiled kernel'],
+            ['Legacy O, single window',
+             f'{t_legacy_win:.4f}',
+             '1.0× (baseline)',
+             f'4 perturbation sims (2 states × ±ε)'],
+            ['JAX O = jacfwd (JIT warmup)',
+             f'{t_jax_eom_warm.duration:.3f}',
+             _speedup(t_legacy_win, t_jax_eom_warm.duration),
+             'First call: traces jacfwd + compiles'],
+            ['JAX O = jacfwd (hot)',
+             f'{t_jax_eom_hot.duration:.4f}',
+             _speedup(t_legacy_win, t_jax_eom_hot.duration),
+             f'Hot call; max |O_diff| = {O_diff_max:.2e}'],
+        ]
+
+        jax_page_data = dict(
+            t_sim_full=t_sim,
+            y_legacy_full=y_legacy_full,
+            y_jax_full=y_jax_full,
+            O_legacy=O_legacy_win,
+            O_jax=O_jax_win,
+            timing_rows=jax_timing_rows,
+        )
+
+        print(f"\n{'─' * 60}")
+        print(f"  JAX autodiff comparison (single window)")
+        print(f"{'─' * 60}")
+        for row in jax_timing_rows:
+            print(f"  {row[0]:<38} {row[1]:>8} s  speedup {row[2]}")
+        print(f"  {'Max |O_jax - O_legacy|':<38} {O_diff_max:.2e}")
+        print(f"{'─' * 60}")
+
+    # --- Final PDF write (includes JAX page if available) ---
     with PdfPages(PDF_PATH) as pdf:
         _make_equations_page(pdf)
         _make_timing_page(pdf, timings, n_steps, n_windows)
@@ -431,6 +631,8 @@ def test_generate_diagnostic_pdf(simulator):
                              max_abs_diff=max_abs_diff,
                              n_threads=N_WORKERS,
                              parallel_crashed=parallel_crashed)
+        if jax_page_data is not None:
+            _make_jax_comparison_page(pdf, **jax_page_data)
 
     assert os.path.exists(PDF_PATH), f"PDF not created at {PDF_PATH}"
     assert os.path.getsize(PDF_PATH) > 1000, "PDF appears empty"

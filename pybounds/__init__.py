@@ -11,3 +11,8 @@ from .observability import transform_states
 from .jacobian import SymbolicJacobian
 
 from .util import colorline, plot_heatmap_log_timeseries
+
+try:
+    from .jax_simulator import JaxSimulator, JaxEmpiricalObservabilityMatrix
+except ImportError:
+    pass  # JAX not installed
