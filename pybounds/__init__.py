@@ -13,6 +13,6 @@ from .jacobian import SymbolicJacobian
 from .util import colorline, plot_heatmap_log_timeseries
 
 try:
-    from .jax_simulator import JaxSimulator, JaxEmpiricalObservabilityMatrix
+    from .jax_simulator import JaxSimulator, JaxEmpiricalObservabilityMatrix, JaxSlidingEmpiricalObservabilityMatrix
 except ImportError:
     pass  # JAX not installed

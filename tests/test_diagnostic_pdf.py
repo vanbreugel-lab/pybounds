@@ -32,7 +32,7 @@ PDF_PATH = 'tests/diagnostic_report.pdf'
 # ---------------------------------------------------------------------------
 try:
     import jax.numpy as jnp
-    from pybounds import JaxSimulator, JaxEmpiricalObservabilityMatrix
+    from pybounds import JaxSimulator, JaxEmpiricalObservabilityMatrix, JaxSlidingEmpiricalObservabilityMatrix
 
     def _dynamics_f_jax(x, u):
         return jnp.array([u[0], 0.0 * u[0]])
@@ -421,6 +421,89 @@ def _make_jax_comparison_page(pdf, t_sim_full, y_legacy_full, y_jax_full,
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# Helper: JAX vmap sliding benchmark page
+# ---------------------------------------------------------------------------
+
+def _make_jax_sliding_page(pdf, serial_time, parallel_time, vmap_warm_time,
+                            vmap_hot_time, n_windows, results_match, max_abs_diff,
+                            n_workers):
+    """Bar chart + summary comparing serial, process-parallel, and JAX vmap SEOM."""
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.text(0.08, 0.96, 'JAX vmap Sliding Observability Benchmark',
+             fontsize=16, fontweight='bold', va='top')
+    fig.text(0.08, 0.92,
+             f'SlidingEmpiricalObservabilityMatrix  |  {n_windows} windows  |  window size: 6',
+             fontsize=9, va='top', color='#444444')
+
+    labels = ['JAX vmap (hot)', 'JAX vmap (JIT warmup)',
+              f'process-parallel ({n_workers} workers)', 'serial (legacy)']
+    times = [vmap_hot_time, vmap_warm_time, parallel_time, serial_time]
+
+    # --- bar chart ---
+    ax = fig.add_axes([0.32, 0.69, 0.55, 0.20])
+    colors = ['#2ca02c', '#98df8a', '#1f77b4', '#ff7f0e']
+    bars = ax.barh(labels, times, color=colors)
+    ax.set_xlabel('Wall-clock time (s)', fontsize=10)
+    ax.tick_params(labelsize=9)
+    ax.spines[['top', 'right']].set_visible(False)
+    xmax = max(times)
+    for bar, val in zip(bars, times):
+        ax.text(bar.get_width() + xmax * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f'{val:.3f} s', va='center', fontsize=9)
+
+    # --- summary text ---
+    correctness_color = '#2ca02c' if results_match else '#d62728'
+    correctness_label = (
+        f'PASS — max |O_jax − O_serial| = {max_abs_diff:.2e}'
+        if results_match else
+        f'FAIL — max |diff| = {max_abs_diff:.2e}')
+
+    def _su(ref, val):
+        return f'{ref / val:.1f}×' if val > 0 else '—'
+
+    summary_y = 0.63
+    lines = [
+        ('Serial (legacy)',             f'{serial_time:.3f} s',     '1.0× (baseline)'),
+        (f'Process-parallel ({n_workers}w)', f'{parallel_time:.3f} s', _su(serial_time, parallel_time)),
+        ('JAX vmap (JIT warmup)',       f'{vmap_warm_time:.3f} s',  _su(serial_time, vmap_warm_time)),
+        ('JAX vmap (hot)',              f'{vmap_hot_time:.4f} s',   _su(serial_time, vmap_hot_time)),
+        ('Correctness',                 correctness_label,           ''),
+    ]
+    for label, value, speedup in lines:
+        fig.text(0.08, summary_y, label + ':',  fontsize=10, fontweight='bold', va='top')
+        color = correctness_color if label == 'Correctness' else 'black'
+        fig.text(0.40, summary_y, value,        fontsize=10, va='top', color=color)
+        fig.text(0.72, summary_y, speedup,      fontsize=10, va='top', color='#333333')
+        summary_y -= 0.052
+
+    # --- notes ---
+    notes_y = 0.35
+    fig.text(0.08, notes_y, 'How it works', fontsize=12, fontweight='bold', va='top')
+    notes_y -= 0.04
+    note_lines = [
+        '• JaxSlidingEmpiricalObservabilityMatrix extracts all window initial states and',
+        '  input sequences into two batched arrays:',
+        '    x0_batch  shape (n_windows, n)        — one x0 per window',
+        '    u_batch   shape (n_windows, w, m)     — one input sequence per window',
+        '• A single vmapped+JIT-compiled jacfwd call computes all Jacobians at once:',
+        '    vmapped_jac = jax.jit(jax.vmap(jax.jacfwd(sim, argnums=0)))',
+        '    jac_batch   = vmapped_jac(x0_batch, u_batch)   # (n_windows, w, p, n)',
+        '• On CPU this becomes a single parallelisable XLA computation; on GPU it would',
+        '  map to a single kernel launch, giving further speedups.',
+        '• No process spawning, no Simulator cloning — pure JAX array operations.',
+        '• JIT warmup cost is paid once; all subsequent calls use the compiled kernel.',
+    ]
+    for line in note_lines:
+        fig.text(0.08, notes_y, line, fontsize=9, va='top', color='#333333',
+                 fontfamily='monospace' if line.startswith('    ') else None)
+        notes_y -= 0.030
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 class _Timer:
     def __init__(self):
         self.start = None
@@ -618,6 +701,49 @@ def test_generate_diagnostic_pdf(simulator):
         print(f"  {'Max |O_jax - O_legacy|':<38} {O_diff_max:.2e}")
         print(f"{'─' * 60}")
 
+    # --- Step 9: JAX vmap sliding benchmark ---
+    jax_sliding_page_data = None
+    if _JAX_AVAILABLE:
+        # JIT warmup: first call traces + compiles the vmapped kernel
+        with _Timer() as t_jax_slide_warm:
+            JSEOM_warm = JaxSlidingEmpiricalObservabilityMatrix(
+                jax_sim, t_sim, x_sim, u_sim, w=w)
+        # Hot call: uses compiled kernel
+        with _Timer() as t_jax_slide_hot:
+            JSEOM = JaxSlidingEmpiricalObservabilityMatrix(
+                jax_sim, t_sim, x_sim, u_sim, w=w)
+
+        # Correctness: compare all windows against serial legacy
+        jax_stack = np.vstack([o for o in JSEOM.O_sliding])
+        serial_stack_full = np.vstack([o for o in SEOM.O_sliding])
+        jax_max_diff = float(np.max(np.abs(jax_stack - serial_stack_full)))
+        jax_correct = jax_max_diff < 1e-6
+
+        jax_sliding_page_data = dict(
+            serial_time=timings[2]['duration'],
+            parallel_time=t_par.duration,
+            vmap_warm_time=t_jax_slide_warm.duration,
+            vmap_hot_time=t_jax_slide_hot.duration,
+            n_windows=n_windows,
+            results_match=jax_correct,
+            max_abs_diff=jax_max_diff,
+            n_workers=N_WORKERS,
+        )
+
+        print(f"\n{'─' * 60}")
+        print(f"  JAX vmap sliding benchmark ({n_windows} windows)")
+        print(f"{'─' * 60}")
+        print(f"  {'Serial (legacy)':<35} {timings[2]['duration']:>7.3f} s  1.0×")
+        print(f"  {'Process-parallel':<35} {t_par.duration:>7.3f} s  "
+              f"{timings[2]['duration'] / t_par.duration:.1f}×")
+        print(f"  {'JAX vmap (JIT warmup)':<35} {t_jax_slide_warm.duration:>7.3f} s  "
+              f"{timings[2]['duration'] / t_jax_slide_warm.duration:.1f}×")
+        print(f"  {'JAX vmap (hot)':<35} {t_jax_slide_hot.duration:>7.4f} s  "
+              f"{timings[2]['duration'] / t_jax_slide_hot.duration:.1f}×")
+        print(f"  {'Correctness (max |diff|)':<35} {jax_max_diff:.2e}  "
+              f"({'PASS' if jax_correct else 'FAIL'})")
+        print(f"{'─' * 60}")
+
     # --- Final PDF write (includes JAX page if available) ---
     with PdfPages(PDF_PATH) as pdf:
         _make_equations_page(pdf)
@@ -633,6 +759,8 @@ def test_generate_diagnostic_pdf(simulator):
                              parallel_crashed=parallel_crashed)
         if jax_page_data is not None:
             _make_jax_comparison_page(pdf, **jax_page_data)
+        if jax_sliding_page_data is not None:
+            _make_jax_sliding_page(pdf, **jax_sliding_page_data)
 
     assert os.path.exists(PDF_PATH), f"PDF not created at {PDF_PATH}"
     assert os.path.getsize(PDF_PATH) > 1000, "PDF appears empty"

@@ -219,6 +219,115 @@ class JaxEmpiricalObservabilityMatrix:
 
 
 # ---------------------------------------------------------------------------
+# JaxSlidingEmpiricalObservabilityMatrix
+# ---------------------------------------------------------------------------
+
+class JaxSlidingEmpiricalObservabilityMatrix:
+    """Sliding observability matrix computed via JAX vmap + jacfwd.
+
+    Batches all sliding windows into a single vmapped ``jax.jacfwd`` call,
+    giving exact Jacobians for every window in one XLA kernel launch.
+
+    Output attributes match those of ``SlidingEmpiricalObservabilityMatrix``
+    (``O_sliding``, ``O_df_sliding``, ``O_time``, ``O_index``, ``t_sim``).
+
+    Parameters
+    ----------
+    jax_simulator : JaxSimulator
+        A configured ``JaxSimulator`` instance.
+    t_sim : array-like, shape (T,)
+        Time vector for the trajectory.
+    x_sim : array-like or dict, shape (T, n)
+        State trajectory.
+    u_sim : array-like or dict, shape (T, m)
+        Input trajectory.
+    w : int
+        Window size in time steps.
+    """
+
+    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w):
+        self.jax_simulator = jax_simulator
+        self.w = w
+        self.n = jax_simulator.n
+        self.p = jax_simulator.p
+        self.state_names = jax_simulator.state_names
+        self.measurement_names = jax_simulator.measurement_names
+
+        self.t_sim = np.asarray(t_sim).ravel()
+        N = len(self.t_sim)
+
+        # Convert x_sim to (T, n) array
+        if isinstance(x_sim, dict):
+            x_arr = np.column_stack([np.asarray(x_sim[k]).ravel()
+                                     for k in jax_simulator.state_names])
+        else:
+            x_arr = np.asarray(x_sim)
+            if x_arr.ndim == 1:
+                x_arr = x_arr[:, None]
+
+        # Convert u_sim to (T, m) array
+        if isinstance(u_sim, dict):
+            u_arr = np.column_stack([np.asarray(u_sim[k]).ravel()
+                                     for k in jax_simulator.input_names])
+        else:
+            u_arr = np.asarray(u_sim)
+            if u_arr.ndim == 1:
+                u_arr = u_arr[:, None]
+
+        if N != x_arr.shape[0]:
+            raise ValueError('t_sim & x_sim must have same number of rows')
+        if N != u_arr.shape[0]:
+            raise ValueError('t_sim & u_sim must have same number of rows')
+        if w > N:
+            raise ValueError('window size must be smaller than trajectory length')
+
+        self.O_index = np.arange(0, N - w + 1, step=1)
+        self.O_time = self.t_sim[self.O_index]
+        n_windows = len(self.O_index)
+
+        # Build batched arrays: x0_batch (n_windows, n), u_batch (n_windows, w, m)
+        x0_batch = jnp.array(
+            np.stack([x_arr[i] for i in self.O_index]), dtype=jnp.float64)
+        u_batch = jnp.array(
+            np.stack([u_arr[i:i + w] for i in self.O_index]), dtype=jnp.float64)
+
+        sim = jax_simulator._simulate_jax
+
+        # Single vmapped jacfwd call — one XLA kernel for all windows
+        vmapped_jac = jax.jit(
+            jax.vmap(jax.jacfwd(sim, argnums=0), in_axes=(0, 0)))
+        jac_batch = np.array(vmapped_jac(x0_batch, u_batch))  # (n_windows, w, p, n)
+
+        # Nominal trajectories for all windows
+        vmapped_sim = jax.jit(jax.vmap(sim, in_axes=(0, 0)))
+        y_batch = np.array(vmapped_sim(x0_batch, u_batch))    # (n_windows, w, p)
+
+        # Build O_df_sliding list (same format as SlidingEmpiricalObservabilityMatrix)
+        measurement_labels = self.measurement_names * w
+        time_labels = np.repeat(np.arange(w), self.p).astype(int)
+
+        self.O_sliding = []
+        self.O_df_sliding = []
+        self.y_nominal_sliding = []
+
+        for i in range(n_windows):
+            O_i = jac_batch[i].reshape(w * self.p, self.n)
+            self.O_sliding.append(O_i)
+            self.y_nominal_sliding.append(y_batch[i])
+
+            O_df_i = pd.DataFrame(O_i, columns=self.state_names,
+                                  index=measurement_labels)
+            O_df_i['time_step'] = time_labels
+            O_df_i = O_df_i.set_index('time_step', append=True)
+            O_df_i.index.names = ['sensor', 'time_step']
+            self.O_df_sliding.append(O_df_i)
+
+    def get_observability_matrix(self):
+        """Return a copy of the sliding O_df list."""
+        return self.O_df_sliding.copy()
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
