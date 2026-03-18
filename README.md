@@ -31,7 +31,7 @@ pip install -e .
 
 For a simple system:
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic flow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example_jax.ipynb) Same example with JAX-accelerated observability (~19× faster): [mono_camera_example_jax.ipynb](examples%2Fmono_camera_example_jax.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/mono_camera_example_jax.ipynb) Same example with JAX-accelerated observability (~19× faster): [mono_camera_example_jax.ipynb](examples%2Fmono_camera_example_jax.ipynb)
 
 For a more complex system:
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)
