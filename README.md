@@ -75,10 +75,8 @@ These notebooks provide a more detailed example of pybounds functionality includ
 * How to use model predictive control to drive systems along specified trajectories 
 * Demonstration of what happens inside the `pybounds.compute_observability` wrapper function, allowing for detailed investigations of the observability calculations
 
-For a simple system:
+**Examples using pybounds with continuous time dynamics**, see these notebook examples:
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic flow measurements: [mono_camera_example.ipynb](examples/mono_camera_example.ipynb)
-
-For a more complex system:
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples/fly_wind_example.ipynb)
 
 ### JAX Accelerated Examples
