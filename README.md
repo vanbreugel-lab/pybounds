@@ -31,6 +31,36 @@ or from source, for development, after cloning the repo:
 pip install -e .
 ```
 
+## Quick Start
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+import pybounds
+
+# 1. Define system dynamics f(X, U) and measurement h(X, U)
+def f(X, U):        # states: gap g, distance d — input u drives g
+    return [U[0], 0]
+
+def h(X, U):        # monocular camera measures the g/d ratio
+    return [X[0] / X[1]]
+
+# 2. Simulate a trajectory
+sim = pybounds.Simulator(f, h, dt=0.01,
+                         state_names=['g', 'd'], input_names=['u'],
+                         measurement_names=['r'])
+t, x, u, _ = sim.simulate(x0={'g': 2.0, 'd': 3.0},
+                           u={'u': 0.1 * np.ones(500)},
+                           return_full_output=True)
+
+# 3. Compute sliding-window observability and Fisher information
+ev = pybounds.compute_observability(sim, t, x, u, R={'r': 0.1})
+
+# 4. Plot minimum error variance over time for each state
+ev.set_index('time')[['g', 'd']].plot(logy=True, ylabel='Min. error variance')
+plt.show()
+```
+
 ## Notebook examples
 
 For a simple system:

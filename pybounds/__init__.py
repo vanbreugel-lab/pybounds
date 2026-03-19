@@ -7,6 +7,7 @@ from .observability import FisherObservability
 from .observability import SlidingFisherObservability
 from .observability import ObservabilityMatrixImage
 from .observability import transform_states
+from .observability import compute_observability
 
 from .jacobian import SymbolicJacobian
 

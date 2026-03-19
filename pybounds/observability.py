@@ -852,3 +852,36 @@ class ObservabilityMatrixImage:
         self.fig = fig
         self.ax = ax
         self.cbar = cbar
+
+
+def compute_observability(simulator, t_sim, x_sim, u_sim, R,
+                          w=6, eps=1e-4, lam=1e-8):
+    """Compute sliding-window Fisher observability in one call.
+
+    Parameters
+    ----------
+    simulator : Simulator
+    t_sim, x_sim, u_sim : trajectory returned by simulator.simulate(..., return_full_output=True)
+    R : dict  — sensor noise covariance, e.g. {'r': 0.1}
+    w : int   — sliding window length (time steps)
+    eps : float — finite-difference perturbation size
+    lam : float — Chernoff regularization for Fisher inversion
+
+    Returns
+    -------
+    DataFrame with columns 'time', 'time_initial', and one column per state
+    containing the minimum error variance for each sliding window.
+    """
+    seom = SlidingEmpiricalObservabilityMatrix(
+        simulator, t_sim, x_sim, u_sim, w=w, eps=eps)
+    sfo = SlidingFisherObservability(
+        seom.O_df_sliding,
+        time=seom.t_sim,
+        R=R,
+        lam=lam,
+        states=simulator.state_names,
+        sensors=simulator.measurement_names,
+        time_steps=np.arange(w),
+        w=None,
+    )
+    return sfo.get_minimum_error_variance()
