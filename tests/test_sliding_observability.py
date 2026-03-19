@@ -75,7 +75,7 @@ class TestSEOMValidation:
         t_s = t_sim[:10]
         x_s = {k: v[:10] for k, v in x_sim.items()}
         u_s = {k: v[:10] for k, v in u_sim.items()}
-        with pytest.raises(ValueError, match='window size must be smaller'):
+        with pytest.raises(ValueError, match='window size.*must be smaller'):
             pybounds.SlidingEmpiricalObservabilityMatrix(
                 simulator, t_s, x_s, u_s, w=20, eps=EPS,
             )

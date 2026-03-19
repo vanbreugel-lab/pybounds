@@ -43,7 +43,7 @@ class TestSimulatorConstruction:
                                input_names=['u'])
 
     def test_raises_if_both_input_names_and_m(self):
-        with pytest.raises(ValueError, match='cannot set in and n'):
+        with pytest.raises(ValueError, match='cannot set input_names and m'):
             pybounds.Simulator(dynamics_f, measurement_h, dt=DT,
                                state_names=['g', 'd'],
                                input_names=['u'], m=1)
