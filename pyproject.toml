@@ -38,6 +38,12 @@ tracker = "https://github.com/vanbreugel-lab/pybounds/issues"
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov"]
 jax = ["jax[cpu]>=0.4.0"]
+docs = [
+    "sphinx>=7.0",
+    "furo",
+    "sphinx-autodoc-typehints",
+    "myst-parser",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -9,6 +9,8 @@ Python implementation of BOUNDS: Bounding Observability for Uncertain Nonlinear 
         <img src="https://github.com/vanbreugel-lab/pybounds/actions/workflows/tests.yaml/badge.svg?branch=main" alt="Tests" height="18"></a>
     <a href="https://codecov.io/gh/vanbreugel-lab/pybounds">
         <img src="https://codecov.io/gh/vanbreugel-lab/pybounds/branch/main/graph/badge.svg" alt="Coverage" height="18"></a>
+    <a href="https://pybounds.readthedocs.io/en/latest/">
+        <img src="https://readthedocs.org/projects/pybounds/badge/?version=latest" alt="Docs" height="18"></a>
 </p>
 
 ## Introduction
@@ -66,10 +68,10 @@ plt.show()
 ## Notebook examples
 
 For a simple system:
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic flow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic flow measurements: [mono_camera_example.ipynb](examples/mono_camera_example.ipynb)
 
 For a more complex system:
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples/fly_wind_example.ipynb)
 
 ### JAX Accelerated Examples
 
@@ -84,8 +86,8 @@ pybounds includes a JAX backend (`JaxSimulator`, `JaxSlidingEmpiricalObservabili
 
 **To use the JAX backend**, install JAX and rewrite your dynamics `f` and measurement `h` using `jax.numpy` instead of `numpy`. See the notebooks below for worked examples.
 
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/mono_camera_example_jax.ipynb) Mono-camera — JAX accelerated: [mono_camera_example_jax.ipynb](examples%2Fmono_camera_example_jax.ipynb)
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/fly_wind_example_jax.ipynb) Fly-wind — JAX accelerated: [fly_wind_example_jax.ipynb](examples%2Ffly_wind_example_jax.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/mono_camera_example_jax.ipynb) Mono-camera — JAX accelerated: [mono_camera_example_jax.ipynb](examples/mono_camera_example_jax.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/fly_wind_example_jax.ipynb) Fly-wind — JAX accelerated: [fly_wind_example_jax.ipynb](examples/fly_wind_example_jax.ipynb)
 
 ## Citation
 
