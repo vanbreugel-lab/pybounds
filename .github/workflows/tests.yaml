@@ -26,4 +26,21 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest tests/ --ignore=tests/test_diagnostic_pdf.py
+        run: pytest tests/ --ignore=tests/test_diagnostic_pdf.py --ignore=tests/test_jax_observability.py
+
+  test-jax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" "jax[cpu]"
+
+      - name: Run JAX tests
+        run: pytest tests/test_jax_observability.py -v
