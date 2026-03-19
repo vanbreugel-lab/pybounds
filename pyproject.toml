@@ -36,7 +36,7 @@ download = "https://pypi.org/project/pybounds/#files"
 tracker = "https://github.com/vanbreugel-lab/pybounds/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "pytest-cov"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

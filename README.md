@@ -5,6 +5,10 @@ Python implementation of BOUNDS: Bounding Observability for Uncertain Nonlinear 
 <p align="center">
     <a href="https://pypi.org/project/pybounds/">
         <img src="https://badge.fury.io/py/pybounds.svg" alt="PyPI version" height="18"></a>
+    <a href="https://github.com/vanbreugel-lab/pybounds/actions/workflows/tests.yaml">
+        <img src="https://github.com/vanbreugel-lab/pybounds/actions/workflows/tests.yaml/badge.svg?branch=main" alt="Tests" height="18"></a>
+    <a href="https://codecov.io/gh/vanbreugel-lab/pybounds">
+        <img src="https://codecov.io/gh/vanbreugel-lab/pybounds/branch/main/graph/badge.svg" alt="Coverage" height="18"></a>
 </p>
 
 ## Introduction
