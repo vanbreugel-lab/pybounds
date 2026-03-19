@@ -33,6 +33,8 @@ pip install -e .
 
 ## Quick Start
 
+This example uses a downward-pointing camera moving horizontally: the two states are ground speed `g` and altitude `d`, and the only measurement is the ventral optic flow ratio `r = g/d`.
+
 ```python
 import numpy as np
 import matplotlib.pyplot as plt
