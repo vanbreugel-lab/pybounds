@@ -35,16 +35,18 @@ pip install -e .
 
 ## Quick Start
 
-This example uses a downward-pointing camera moving horizontally: the two states are ground speed `g` and altitude `d`, and the only measurement is the ventral optic flow ratio `r = g/d`.
+To demonstrate pybounds with a simple example we use a downward-pointing camera moving horizontally with acceleration that is controlled directly with control inputs (u). The two states are ground speed `g` and (constant) altitude `d`, and the only measurement is the ventral optic flow ratio `r = g/d`. We use pybounds to understand when `g` and `d` are observable. 
+
+See notebooks in next section for more detailed usage examples. 
 
 ```python
 import numpy as np
 import matplotlib.pyplot as plt
 import pybounds
 
-# 1. Define system dynamics f(X, U) and measurement h(X, U)
-def f(X, U):        # states: gap g, distance d — input u drives g
-    return [U[0], 0]
+# 1. Define continuous time system dynamics f(X, U) and measurement h(X, U)
+def f(X, U):         # states: gap g, distance d — input u drives g
+    return [U[0], 0] # returns: d/dt(g), d/dt(d) 
 
 def h(X, U):        # monocular camera measures the g/d ratio
     return [X[0] / X[1]]
@@ -67,6 +69,12 @@ plt.show()
 
 ## Notebook examples
 
+### Basic Examples
+
+These notebooks provide a more detailed example of pybounds functionality including: 
+* How to use model predictive control to drive systems along specified trajectories 
+* Demonstration of what happens inside the `pybounds.compute_observability` wrapper function, allowing for detailed investigations of the observability calculations
+
 For a simple system:
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic flow measurements: [mono_camera_example.ipynb](examples/mono_camera_example.ipynb)
 
@@ -88,6 +96,10 @@ pybounds includes a JAX backend (`JaxSimulator`, `JaxSlidingEmpiricalObservabili
 
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/mono_camera_example_jax.ipynb) Mono-camera — JAX accelerated: [mono_camera_example_jax.ipynb](examples/mono_camera_example_jax.ipynb)
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/fly_wind_example_jax.ipynb) Fly-wind — JAX accelerated: [fly_wind_example_jax.ipynb](examples/fly_wind_example_jax.ipynb)
+
+### Using a Custom Simulator
+
+This has received the least development, however, a working tutorial can be found [here](https://github.com/florisvb/Nonlinear_and_Data_Driven_Estimation/blob/main/Lesson_8_Empirical_Nonlinear_Observability/C_pybounds_with_custom_simulator_tutorial.ipynb).
 
 ## Citation
 
