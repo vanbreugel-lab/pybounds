@@ -59,7 +59,7 @@ class Simulator(object):
             self.input_names = ['u_' + str(m) for m in range(self.m)]
         else:  # input names given
             if m is not None:
-                raise ValueError('cannot set in and n')
+                raise ValueError('cannot set input_names and m')
 
             self.input_names = list(input_names)
             self.m = len(self.input_names)
@@ -258,7 +258,7 @@ class Simulator(object):
                 for n, key in enumerate(self.x0.keys()):  # each state
                     self.x0[key] = x0[n]
             else:
-                raise Exception('x0 must be either a dict, tuple, list, or numpy array')
+                raise ValueError('x0 must be either a dict, tuple, list, or numpy array')
 
     def update_dict(self, data=None, name=None):
         """ Update.
@@ -289,23 +289,23 @@ class Simulator(object):
                     update[key] = data[:, n]
 
             else:
-                raise Exception(name + ' must be either a dict, tuple, list, or numpy array')
+                raise ValueError(f'{name} must be either a dict, tuple, list, or numpy array')
 
         # Make sure inputs are the same size
         points = np.array([update[key].shape[0] for key in update.keys()])
         points_check = points == points[0]
         if not np.all(points_check):
-            raise Exception(name + ' not the same size')
+            raise ValueError(f'{name} inputs are not all the same length')
 
     def simulate(self, x0=None, u=None, aux=None, mpc=False, return_full_output=False):
         """
         Simulate the system.
 
-        :params x0: initial state dict or array
-        :params u: input dict or array, if True then mpc must be None
-        :params aux: auxiliary input
-        :params mpc: boolean to run MPC, if True then u must be None
-        :params return_full_output: boolean to run (time, x, u, y) instead of y
+        :param x0: initial state dict or array
+        :param u: input dict or array, if True then mpc must be None
+        :param aux: auxiliary input
+        :param mpc: boolean to run MPC, if True then u must be None
+        :param return_full_output: boolean to run (time, x, u, y) instead of y
         """
 
         if (mpc is True) and (u is not None):

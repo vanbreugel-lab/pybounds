@@ -6,13 +6,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Install locally (editable)
-pip install -e .
+pip install -e ".[dev]"   # includes pytest and pytest-cov
 
 # Install from PyPI
 pip install pybounds
+
+# Install with JAX backend
+pip install "pybounds[jax]"   # or: pip install jax[cpu]
 ```
 
-There is no test suite or linter configured. Functionality is demonstrated through Jupyter notebooks in [examples/](examples/).
+## Tests
+
+```bash
+pytest tests/                                    # all fast tests
+pytest tests/test_diagnostic_pdf.py -v -s        # generates tests/diagnostic_report.pdf (slow, ~40s)
+pytest tests/test_jax_observability.py           # JAX backend tests (requires jax installed)
+pytest tests/test_simulator.py::TestSimulator::test_output_shape  # single test
+```
+
+No linter is configured. Functionality is also demonstrated through Jupyter notebooks in [examples/](examples/).
 
 ## Architecture
 
@@ -34,11 +46,16 @@ There is no test suite or linter configured. Functionality is demonstrated throu
 
 ### Data flow
 
-1. User defines `f(x, u, t)` (dynamics) and `h(x, u, t)` (measurements) as CasADi symbolic expressions.
-2. `Simulator` integrates the system over time, returning DataFrames.
-3. Observability classes perturb initial states by epsilon, re-simulate, and construct the empirical observability Gramian.
-4. Results can be projected into transformed coordinates via `transform_states()`.
+1. User defines `f(x, u)` (dynamics) and `h(x, u)` (measurements) as plain Python functions.
+2. `Simulator` integrates the system over time via do_mpc/CasADi, returning labeled dicts.
+3. Observability classes perturb initial states by epsilon, re-simulate, and construct the empirical observability matrix O.
+4. `FisherObservability` / `SlidingFisherObservability` compute F = OᵀR⁻¹O and invert for minimum error variance.
+5. Results can be projected into transformed coordinates via `transform_states()`.
+
+### JAX backend
+
+`JaxSimulator`, `JaxEmpiricalObservabilityMatrix`, and `JaxSlidingEmpiricalObservabilityMatrix` (in [pybounds/jax_simulator.py](pybounds/jax_simulator.py)) replace finite-difference Jacobians with exact autodiff via `jax.jacfwd` + `jax.vmap`. Requires `f` and `h` to use `jax.numpy` instead of `numpy`. The `compute_observability()` helper accepts `use_jax=True` to route through this backend.
 
 ### Dependencies
 
-do_mpc and CasADi are central — CasADi provides symbolic math and solvers; do_mpc wraps model definition and simulation. NumPy/SciPy/Pandas handle numerical operations and data; SymPy is used only in `SymbolicJacobian`.
+do_mpc and CasADi are central — CasADi provides symbolic math and solvers; do_mpc wraps model definition and simulation. NumPy/SciPy/Pandas handle numerical operations and data; SymPy is used only in `SymbolicJacobian`. JAX is optional.

@@ -224,7 +224,7 @@ class SlidingEmpiricalObservabilityMatrix:
         :param np.array u_sim: input array (N, m), can also be dict
         :param aux_list: auxiliary input that can be passed to Simulator class
         :param np.array w: window size for O calculations, will automatically set how many windows to compute
-        :params float eps: tolerance for sliding windows
+        :param float eps: tolerance for sliding windows
         :param float eps: epsilon value for perturbations to construct O's, should be small number
         :param bool parallel_sliding: if True, run the sliding windows in parallel using processes.
             Requires ``simulator_factory`` when parallel_sliding=True (see below).

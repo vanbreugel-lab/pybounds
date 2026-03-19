@@ -12,7 +12,7 @@ authors = [
 ]
 description = "Bounding Observability for Uncertain Nonlinear Dynamics Systems (BOUNDS)"
 readme = "README.md"
-requires-python = ">=3.0"
+requires-python = ">=3.8"
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",

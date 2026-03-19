@@ -185,8 +185,6 @@ def colorline(x, y, z, ax=None, cmap=plt.get_cmap('copper'), norm=None, linewidt
     if norm is None:
         norm = plt.Normalize(np.min(z), np.max(z))
 
-    print(norm)
-
     # Make segments
     segments = make_segments(x, y)
     lc = mcoll.LineCollection(segments, array=z, cmap=cmap, norm=norm,
