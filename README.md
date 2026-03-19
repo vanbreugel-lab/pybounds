@@ -35,6 +35,7 @@ For a simple system:
 
 For a more complex system:
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/claude_explorations/examples/fly_wind_example_jax.ipynb) Same example with JAX-accelerated observability: [fly_wind_example_jax.ipynb](examples%2Ffly_wind_example_jax.ipynb)
 
 ## Citation
 
