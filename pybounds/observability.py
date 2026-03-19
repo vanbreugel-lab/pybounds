@@ -855,25 +855,41 @@ class ObservabilityMatrixImage:
 
 
 def compute_observability(simulator, t_sim, x_sim, u_sim, R,
-                          w=6, eps=1e-4, lam=1e-8):
+                          w=6, eps=1e-4, lam=1e-8, use_jax=False):
     """Compute sliding-window Fisher observability in one call.
 
     Parameters
     ----------
-    simulator : Simulator
+    simulator : Simulator or JaxSimulator
+        A configured simulator instance.  Pass a ``JaxSimulator`` when
+        ``use_jax=True``.
     t_sim, x_sim, u_sim : trajectory returned by simulator.simulate(..., return_full_output=True)
     R : dict  — sensor noise covariance, e.g. {'r': 0.1}
     w : int   — sliding window length (time steps)
-    eps : float — finite-difference perturbation size
+    eps : float — finite-difference perturbation size (ignored when use_jax=True)
     lam : float — Chernoff regularization for Fisher inversion
+    use_jax : bool — if True, use JAX autodiff (exact Jacobians, faster for many windows).
+        Requires JAX to be installed and ``simulator`` to be a ``JaxSimulator`` whose
+        ``f`` and ``h`` functions are written with ``jax.numpy`` (``jnp``) instead of
+        ``numpy``.  See ``JaxSimulator`` for details.
 
     Returns
     -------
     DataFrame with columns 'time', 'time_initial', and one column per state
     containing the minimum error variance for each sliding window.
     """
-    seom = SlidingEmpiricalObservabilityMatrix(
-        simulator, t_sim, x_sim, u_sim, w=w, eps=eps)
+    if use_jax:
+        try:
+            from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
+        except ImportError:
+            raise ImportError(
+                "JAX is not installed. Install it with: pip install jax[cpu]"
+            )
+        seom = JaxSlidingEmpiricalObservabilityMatrix(
+            simulator, t_sim, x_sim, u_sim, w=w)
+    else:
+        seom = SlidingEmpiricalObservabilityMatrix(
+            simulator, t_sim, x_sim, u_sim, w=w, eps=eps)
     sfo = SlidingFisherObservability(
         seom.O_df_sliding,
         time=seom.t_sim,
