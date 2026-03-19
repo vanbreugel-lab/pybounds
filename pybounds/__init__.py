@@ -15,5 +15,23 @@ from .util import colorline, plot_heatmap_log_timeseries
 
 try:
     from .jax_simulator import JaxSimulator, JaxEmpiricalObservabilityMatrix, JaxSlidingEmpiricalObservabilityMatrix
+    _JAX_AVAILABLE = True
 except ImportError:
-    pass  # JAX not installed
+    _JAX_AVAILABLE = False
+
+__all__ = [
+    'Simulator',
+    'EmpiricalObservabilityMatrix',
+    'SlidingEmpiricalObservabilityMatrix',
+    'FisherObservability',
+    'SlidingFisherObservability',
+    'ObservabilityMatrixImage',
+    'transform_states',
+    'compute_observability',
+    'SymbolicJacobian',
+    'colorline',
+    'plot_heatmap_log_timeseries',
+    'JaxSimulator',
+    'JaxEmpiricalObservabilityMatrix',
+    'JaxSlidingEmpiricalObservabilityMatrix',
+]

@@ -297,7 +297,7 @@ class SlidingEmpiricalObservabilityMatrix:
             self.w = w
 
         if self.w > self.N:
-            raise ValueError('window size must be smaller than trajectory length')
+            raise ValueError(f'window size ({self.w}) must be smaller than trajectory length ({self.N})')
 
         # All the indices to calculate O
         self.O_index = np.arange(0, self.N - self.w + 1, step=1)  # indices to compute O
