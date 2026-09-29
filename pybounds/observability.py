@@ -2,15 +2,123 @@ import numpy as np
 import pandas as pd
 import sympy as sp
 import warnings
+import pickle
+import pickletools
+import sys
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
+from .simulator import Simulator
 from .util import LatexStates
 from .jacobian import SymbolicJacobian
 
+# Default regularization for the Fisher information inverse (F + lam*I)^-1
+DEFAULT_LAM = 1e-8
 
-class EmpiricalObservabilityMatrix:
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for process-based parallel sliding window computation.
+# Must live at module scope so they are picklable by multiprocessing.
+# ---------------------------------------------------------------------------
+
+# Per-process Simulator instance (set in pool initialiser).
+_process_simulator = None
+
+
+def _pool_initializer(factory):
+    """Create one Simulator per worker process."""
+    global _process_simulator
+    _process_simulator = factory()
+
+
+def _check_spawn_picklable(obj, name):
+    """Raise a clear error if spawned worker processes could not load obj.
+
+    Spawned workers import functions by module and name. Functions defined in an interactive
+    __main__ (e.g. a Jupyter notebook) cannot be imported, which makes the pool hang, and
+    lambdas / nested functions cannot be pickled at all.
+    """
+    if obj is None:
+        return
+
+    try:
+        data = pickle.dumps(obj, protocol=2)  # protocol 2 names every global as 'module name'
+    except Exception as e:
+        raise ValueError(f'{name} must be picklable for process-based parallelism '
+                         f'(lambdas and nested functions are not); define it at module level') from e
+
+    main_has_file = getattr(sys.modules.get('__main__'), '__file__', None) is not None
+    if not main_has_file:
+        for opcode, arg, _ in pickletools.genops(data):
+            if opcode.name == 'GLOBAL' and arg.split(' ')[0] == '__main__':
+                raise ValueError(
+                    f'{name} uses {arg.split(" ", 1)[1]!r}, which is defined in an interactive session '
+                    f'(e.g. a Jupyter notebook) that worker processes cannot import. Move it into a .py '
+                    f'file and import it from there, or use parallel_sliding=False.')
+
+
+def _compute_window(args):
+    """Compute EmpiricalObservabilityMatrix for a single window (called in worker)."""
+    global _process_simulator
+    n, O_index, x_sim, u_sim, t_sim, N, w, eps, aux_list, z_function, z_state_names = args
+
+    x0 = np.squeeze(x_sim[O_index[n], :])
+    win = np.arange(O_index[n], O_index[n] + w, step=1)
+    win = win[win < N]
+    t_win = t_sim[win]
+    u_win = u_sim[win, :]
+
+    EOM = EmpiricalObservabilityMatrix(_process_simulator, x0, u_win,
+                                       aux=aux_list[n], eps=eps,
+                                       parallel=False,
+                                       z_function=z_function,
+                                       z_state_names=z_state_names)
+    window_data = {
+        't': t_win.copy(), 'u': u_win.copy(),
+        'y': EOM.y_nominal.copy(),
+        'y_plus': EOM.y_plus.copy(),
+        'y_minus': EOM.y_minus.copy(),
+    }
+    return EOM.O.copy(), EOM.O_df.copy(), window_data
+
+
+def _reject_jax_simulator(simulator, cls_name):
+    """Raise a clear error when a JaxSimulator is passed to a CasADi-backend class."""
+    jax_module = sys.modules.get(f'{__package__}.jax_simulator')
+    if jax_module is not None and isinstance(simulator, jax_module.JaxSimulator):
+        raise TypeError(f'{cls_name} does not accept a JaxSimulator; use Jax{cls_name} instead '
+                        '(or compute_observability(..., use_jax=True)).')
+
+
+def _ordered_values(d, names, label):
+    """Values of dict d ordered by the simulator's names (insertion order if it has none)."""
+    if names is None:
+        return list(d.values())
+    names = list(names)
+    if set(d.keys()) != set(names):
+        raise ValueError(f'{label} keys {list(d.keys())} must match the simulator names {names}')
+    return [d[k] for k in names]
+
+
+class _TransformJacobianAliases:
+    """Deprecated attribute names from before the transform Jacobians were correctly labeled."""
+
+    @property
+    def dzdx(self):
+        warnings.warn('dzdx is deprecated: it has always held dx/dz. Use dxdz instead.',
+                      DeprecationWarning, stacklevel=2)
+        return self.dxdz
+
+    @property
+    def dxdz_sym(self):
+        warnings.warn('dxdz_sym is deprecated: it has always held the symbolic dz/dx. Use dzdx_sym instead.',
+                      DeprecationWarning, stacklevel=2)
+        return self.dzdx_sym
+
+
+class EmpiricalObservabilityMatrix(_TransformJacobianAliases):
     def __init__(self, simulator, x0, u, aux=None, eps=1e-5, parallel=False,
                  z_function=None, z_state_names=None):
         """ Construct an empirical observability matrix O.
@@ -21,7 +129,8 @@ class EmpiricalObservabilityMatrix:
         :param dict/np.array u: inputs array
         :param aux: auxiliary input that can be passed to Simulator class
         :param float eps: epsilon value for perturbations to construct O, should be small number
-        :param bool parallel: if True, run the perturbations in parallel
+        :param bool parallel: if True, run the perturbations in parallel using threads.
+            Only safe for thread-safe custom simulators; ignored (with a warning) for pybounds.Simulator
         :param callable z_function: function that transforms coordinates from original to new states
             must be of the form z = z_function(x), where x & z are the same size
             should use sympy functions wherever possible
@@ -31,18 +140,19 @@ class EmpiricalObservabilityMatrix:
         """
 
         # Store inputs
+        _reject_jax_simulator(simulator, 'EmpiricalObservabilityMatrix')
         self.simulator = simulator
         self.aux = aux
         self.eps = eps
         self.parallel = parallel
 
         if isinstance(x0, dict):
-            self.x0 = np.array(list(x0.values()))
+            self.x0 = np.array(_ordered_values(x0, getattr(simulator, 'state_names', None), 'x0'))
         else:
-            self.x0 = np.array(x0).squeeze()
+            self.x0 = np.ravel(np.array(x0))  # 1-D, also for a single state
 
         if isinstance(u, dict):
-            self.u = np.vstack(list(u.values())).T
+            self.u = np.vstack(_ordered_values(u, getattr(simulator, 'input_names', None), 'u')).T
         else:
             self.u = np.array(u)
 
@@ -94,7 +204,7 @@ class EmpiricalObservabilityMatrix:
 
         # Perform coordinate transformation on O, if specified
         if z_function is not None:
-            self.O_df, self.dzdx, self.dxdz_sym = transform_states(O=self.O_df,
+            self.O_df, self.dxdz, self.dzdx_sym = transform_states(O=self.O_df,
                                                                    square_flag=False,
                                                                    z_function=z_function,
                                                                    x0=self.x0,
@@ -102,8 +212,8 @@ class EmpiricalObservabilityMatrix:
             self.state_names = tuple(self.O_df.columns)
             self.O = self.O_df.values
         else:
-            self.dzdx = None
-            self.dxdz_sym = None
+            self.dxdz = None
+            self.dzdx_sym = None
 
     def run(self, parallel=None):
         """ Construct empirical observability matrix.
@@ -111,6 +221,18 @@ class EmpiricalObservabilityMatrix:
 
         if parallel is not None:
             self.parallel = parallel
+
+        # The CasADi/IDAS integrator inside Simulator is stateful, so threads sharing one instance
+        # corrupt each other's runs. Only custom thread-safe simulators can run in parallel here.
+        if self.parallel and isinstance(self.simulator, Simulator):
+            warnings.warn(
+                'parallel=True is not thread-safe with pybounds.Simulator (CasADi/IDAS); '
+                'running perturbations sequentially instead. '
+                'Use SlidingEmpiricalObservabilityMatrix(parallel_sliding=True, simulator_factory=...) '
+                'for process-based parallelism.',
+                RuntimeWarning, stacklevel=2,
+            )
+            self.parallel = False
 
         # Run simulations for perturbed initial conditions
         state_index = np.arange(0, self.n).tolist()
@@ -172,6 +294,7 @@ class EmpiricalObservabilityMatrix:
 class SlidingEmpiricalObservabilityMatrix:
     def __init__(self, simulator, t_sim, x_sim, u_sim, aux_list=None, w=None, eps=1e-5,
                  parallel_sliding=False, parallel_perturbation=False,
+                 simulator_factory=None, n_workers=None,
                  z_function=None, z_state_names=None):
         """ Construct empirical observability matrix O in sliding windows along a trajectory.
 
@@ -182,16 +305,39 @@ class SlidingEmpiricalObservabilityMatrix:
         :param np.array u_sim: input array (N, m), can also be dict
         :param aux_list: auxiliary input that can be passed to Simulator class
         :param np.array w: window size for O calculations, will automatically set how many windows to compute
-        :params float eps: tolerance for sliding windows
+        :param float eps: tolerance for sliding windows
         :param float eps: epsilon value for perturbations to construct O's, should be small number
-        :param bool parallel_sliding: if True, run the sliding windows in parallel
-        :param bool parallel_perturbation: if True, run the perturbations in parallel
+        :param bool parallel_sliding: if True, run the sliding windows in parallel using processes.
+            Requires ``simulator_factory`` when parallel_sliding=True (see below).
+            Without a factory, custom simulators run in threads (they must be thread-safe), and
+            pybounds.Simulator runs sequentially with a warning.
+        :param bool parallel_perturbation: if True, run the perturbations in parallel (thread-based,
+            only safe when the simulator's simulate() is thread-safe; ignored for pybounds.Simulator).
+        :param callable simulator_factory: zero-argument callable that returns a fresh Simulator.
+            Required for correct process-based parallelism (``parallel_sliding=True``).
+            It (and z_function) must be importable by worker processes: define it in a .py file,
+            not in a Jupyter notebook or interactive session, or a ValueError is raised.
+            Each worker process will call factory() once to create its own Simulator instance,
+            avoiding the thread-safety issues of CasADi/IDAS.  Example::
+
+                def make_sim():
+                    return pybounds.Simulator(dynamics_f, h, dt=0.01,
+                                             state_names=['g', 'd'], ...)
+
+                SEOM = SlidingEmpiricalObservabilityMatrix(
+                    simulator, ..., parallel_sliding=True, simulator_factory=make_sim)
+
+        :param int n_workers: number of worker processes for process-based parallelism.
+            Defaults to min(n_windows, os.cpu_count()).
         """
 
+        _reject_jax_simulator(simulator, 'SlidingEmpiricalObservabilityMatrix')
         self.simulator = simulator
         self.eps = eps
         self.parallel_sliding = parallel_sliding
         self.parallel_perturbation = parallel_perturbation
+        self.simulator_factory = simulator_factory
+        self.n_workers = n_workers
         self.z_function = z_function
         self.z_state_names = z_state_names
 
@@ -203,12 +349,13 @@ class SlidingEmpiricalObservabilityMatrix:
 
         # Make x_sim & u_sim arrays
         if isinstance(x_sim, dict):
-            self.x_sim = np.vstack((list(x_sim.values()))).T
+            self.x_sim = np.vstack(_ordered_values(x_sim, getattr(simulator, 'state_names', None), 'x_sim')).T
         else:
-            self.x_sim = np.array(x_sim).squeeze()
+            x_sim = np.array(x_sim)
+            self.x_sim = x_sim.reshape(x_sim.shape[0], -1)  # (N, n), also for a single state
 
         if isinstance(u_sim, dict):
-            self.u_sim = np.vstack(list(u_sim.values())).T
+            self.u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T
         else:
             self.u_sim = np.array(u_sim)
 
@@ -235,8 +382,10 @@ class SlidingEmpiricalObservabilityMatrix:
         else:
             self.w = w
 
+        if self.w < 1:
+            raise ValueError(f'window size ({self.w}) must be at least 1')
         if self.w > self.N:
-            raise ValueError('window size must be smaller than trajectory length')
+            raise ValueError(f'window size ({self.w}) must be smaller than trajectory length ({self.N})')
 
         # All the indices to calculate O
         self.O_index = np.arange(0, self.N - self.w + 1, step=1)  # indices to compute O
@@ -264,14 +413,47 @@ class SlidingEmpiricalObservabilityMatrix:
         self.O_sliding = []
         self.O_df_sliding = []
 
+        # Threads sharing one pybounds Simulator corrupt each other's CasADi/IDAS runs
+        if self.parallel_sliding and self.simulator_factory is None and isinstance(self.simulator, Simulator):
+            warnings.warn(
+                'parallel_sliding=True without simulator_factory is not thread-safe with pybounds.Simulator '
+                '(CasADi/IDAS); running windows sequentially instead. '
+                'Pass simulator_factory=<callable> to use process-based parallelism.',
+                RuntimeWarning, stacklevel=2)
+            self.parallel_sliding = False
+
         # Construct O's
         n_point_range = np.arange(0, self.n_point).astype(int)
-        if self.parallel_sliding:  # multiprocessing
-            # with Pool(4) as pool:
-            #     results = pool.map(self.construct, n_point_range)
+        if self.parallel_sliding:
+            if self.simulator_factory is not None:
+                # ---- Process-based parallelism (safe with CasADi/IDAS) ----
+                # Each worker process gets its own Simulator via the factory.
+                import os
+                _check_spawn_picklable(self.simulator_factory, 'simulator_factory')
+                _check_spawn_picklable(self.z_function, 'z_function')
+                n_workers = self.n_workers or min(self.n_point, os.cpu_count() or 1)
+                args_list = [
+                    (n, self.O_index, self.x_sim, self.u_sim, self.t_sim,
+                     self.N, self.w, self.eps, self.aux_list,
+                     self.z_function, self.z_state_names)
+                    for n in n_point_range
+                ]
+                ctx = multiprocessing.get_context('spawn')
+                with ctx.Pool(processes=n_workers,
+                              initializer=_pool_initializer,
+                              initargs=(self.simulator_factory,)) as pool:
+                    results = pool.map(_compute_window, args_list)
 
-            with ThreadPoolExecutor(max_workers=12) as executor:
-                results = list(executor.map(self.construct, n_point_range))
+                for r in results:
+                    self.O_sliding.append(r[0])
+                    self.O_df_sliding.append(r[1])
+                    for k in self.window_data.keys():
+                        self.window_data[k].append(r[2][k])
+
+            else:
+                # ---- Thread-based parallelism, only reached for custom (thread-safe) simulators ----
+                with ThreadPoolExecutor(max_workers=12) as executor:
+                    results = list(executor.map(self.construct, n_point_range))
 
                 for r in results:
                     self.O_sliding.append(r[0])
@@ -329,7 +511,7 @@ class SlidingEmpiricalObservabilityMatrix:
 
 
 class FisherObservability:
-    def __init__(self, O, R=None, lam=None, force_R_scalar=False,
+    def __init__(self, O, R=None, lam=DEFAULT_LAM, force_R_scalar=False,
                  states=None, sensors=None, time_steps=None, w=None):
         """ Evaluate the observability of a state variable(s) using the Fisher Information Matrix.
 
@@ -338,11 +520,17 @@ class FisherObservability:
             can also be set as pd.DataFrame where columns set the state names & a multilevel index sets the
             measurement names: O.index names must be ('sensor', 'time_step')
         :param None | np.array | float | dict  R: measurement noise covariance matrix (w*p x w*p)
-            can also be set as pd.DataFrame where R.index = R.columns = O.index
+            as an array, rows/columns follow the row order of the O passed in (it is subset and reordered with O)
+            can also be set as pd.DataFrame where R.index = R.columns = O.index (aligned by label)
             can also be a scaler where R = R * I_(nxn)
             can also be dict where keys must correspond to the 'sensor' index in O data-frame
             if None, then R = I_(nxn)
-        :param float lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
+        :param float | str lam: regularization for inverting F, computed as (F + lam*I)^-1 (Chernoff inverse).
+            1/lam is the ceiling on the minimum error variance: no state's error variance can exceed 1/lam,
+            so a value near 1/lam means the state is unobservable (or nearly so), not that it has that variance.
+            lam is absolute, so it should be small relative to the eigenvalues of F, which scale with 1/R
+            and with the units of each state. Default 1e-8 (ceiling of 1e8).
+            If lam='limit', compute the limit lam -> 0 symbolically.
         :param bool force_R_scalar: force R to be a scalar, useful when the resulting R matrix is too big to fit in memory
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -357,10 +545,11 @@ class FisherObservability:
             self.O = O.copy()
             self.sensor_names = tuple(O.index.get_level_values('sensor'))
             self.state_names = tuple(O.columns)
-        elif isinstance(O, np.ndarray):  # array given
+        elif isinstance(O, np.ndarray):  # array given, treat each row as one time-step of a single sensor 'y'
             self.sensor_names = tuple(['y' for _ in range(self.pw)])
             self.state_names = tuple(['x_' + str(n) for n in range(self.n)])
-            self.O = pd.DataFrame(O, index=self.sensor_names, columns=self.state_names)
+            index = pd.MultiIndex.from_arrays([self.sensor_names, np.arange(self.pw)], names=['sensor', 'time_step'])
+            self.O = pd.DataFrame(O, index=index, columns=self.state_names)
         else:
             raise TypeError('O is not a pandas data-frame or numpy array')
 
@@ -388,8 +577,9 @@ class FisherObservability:
         else:
             self.time_steps = np.array(time_steps)
 
-        # Get subset of O
-        self.O = O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
+        # Get subset of O, keeping the full index so a matrix R can be aligned with it
+        self._O_index_full = self.O.index
+        self.O = self.O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
 
         # Reset the size of O
         self.pw = self.O.shape[0]  # number of sensors * time-steps
@@ -412,14 +602,13 @@ class FisherObservability:
             self.set_noise_covariance(R=R)
 
             # Calculate Fisher Information Matrix for non-scalar R
-            self.F = self.O.values.T @ self.R_inv.values.squeeze() @ self.O.values
+            self.F = self.O.values.T @ self.R_inv.values @ self.O.values
 
         self.F = pd.DataFrame(self.F, index=self.O.columns, columns=self.O.columns)
 
         # Set sigma
         if lam is None:
-            # np.linalg.eig(self.F)
-            self.lam = 0.0
+            self.lam = DEFAULT_LAM
         else:
             self.lam = lam
 
@@ -458,14 +647,20 @@ class FisherObservability:
             if R is None:  # set R as identity matrix
                 warnings.warn('R not set, defaulting to identity matrix')
             else:  # set R directly
-                if np.atleast_1d(R).shape[0] == 1:  # given scalar
-                    self.R = R * self.R
-                elif isinstance(R, pd.DataFrame):  # matrix R in data-frame
-                    self.R = R.copy()
-                elif isinstance(R, np.ndarray):  # matrix in array
-                    self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
-                elif isinstance(R, float) or isinstance(R, int):  # set as scalar multiplied by identity matrix
-                    self.R = R * self.R
+                if isinstance(R, pd.DataFrame):  # matrix R in data-frame, aligned with O by index labels
+                    self.R = R.loc[self.O.index, self.O.index].copy()
+                elif isinstance(R, np.ndarray) and R.ndim == 2:  # matrix in array
+                    n_full = len(self._O_index_full)
+                    if R.shape == (n_full, n_full):  # rows/columns in the order of the O passed in
+                        R_full = pd.DataFrame(R, index=self._O_index_full, columns=self._O_index_full)
+                        self.R = R_full.loc[self.O.index, self.O.index].copy()
+                    elif R.shape == (self.pw, self.pw):  # already matches the subset & sorted O
+                        self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
+                    else:
+                        raise ValueError(f'R array must be ({n_full}, {n_full}) to match O, '
+                                         f'or ({self.pw}, {self.pw}) to match the selected subset of O')
+                elif np.size(R) == 1:  # scalar multiplied by identity matrix
+                    self.R = float(np.squeeze(R)) * self.R
                 else:
                     raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
 
@@ -484,7 +679,7 @@ class FisherObservability:
 
 
 class SlidingFisherObservability:
-    def __init__(self, O_list, R=None, lam=1e6, time=None,
+    def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
                  states=None, sensors=None, time_steps=None, w=None):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
@@ -495,7 +690,9 @@ class SlidingFisherObservability:
             can also be a scaler where R = R * I_(nxn)
             can also be dict where keys must correspond to the 'sensor' index in O data-frame
             if None, then R = I_(nxn)
-        :param float | np.array lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
+        :param float | str lam: regularization for inverting F in each window, computed as (F + lam*I)^-1.
+            1/lam is the ceiling on the minimum error variance (see FisherObservability). Default 1e-8.
+            If lam='limit', compute the limit lam -> 0 symbolically.
         :param None | np.array time: time vector the same size as O_list
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -515,7 +712,7 @@ class SlidingFisherObservability:
 
         # Set time-step
         if time is not None:
-            if self.n_window > 1:  # compute time-step from vector
+            if len(self.time) > 1:  # compute time-step from vector
                 self.dt = np.mean(np.diff(self.time))
             else:
                 self.dt = 0.0
@@ -539,15 +736,18 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
-        self.shift_index = int(np.round((1 / 2) * float(FO.w)))
-        self.shift_time = self.shift_index * self.dt  # shift the time forward by half the window size
+        # Shift the time forward by half the window size. Floor division puts odd windows at their center
+        # time-step (w-1)/2; np.round's banker's rounding gave 2, 2, 4, 4 for w = 3, 5, 7, 9.
+        self.shift_index = int(FO.w) // 2
+        self.shift_time = self.shift_index * self.dt
         self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
-        if self.n_window > 1:  # more than 1 window
+        if self.n_window > 1 or time is not None:  # align windows with the time vector
             self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
             time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
             self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
-        else:
+        else:  # single window without a time vector: time in units of time-steps
             self.EV_aligned = self.EV.copy()
+            self.EV_aligned.insert(0, 'time', self.EV['time_initial'] + self.shift_time)
 
     def get_minimum_error_variance(self):
         return self.EV_aligned.copy()
@@ -570,8 +770,8 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
 
         :return:
             Z: observability matrix or Fisher information matrix in transformed coordinates
-            dzdx: numerical Jacobian dz/dx (inverse of dx/dz) evaluated at x0
-            dxdz_sym: symbolic Jacobian dx/dz
+            dxdz: numerical Jacobian dx/dz (inverse of dz/dx) evaluated at x0, so that O_z = O @ dxdz
+            dzdx_sym: symbolic Jacobian dz/dx of z_function
     """
 
     # Symbolic vector of original states
@@ -580,23 +780,23 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
     # Initialize the Jacobian calculator with a Python function
     jacobian_calculator_func = SymbolicJacobian(func=z_function, state_vars=x_sym)
 
-    # Get the symbolic Jacobian dx/dz
-    dxdz_sym = jacobian_calculator_func.jacobian_symbolic
+    # Get the symbolic Jacobian dz/dx
+    dzdx_sym = jacobian_calculator_func.jacobian_symbolic
 
     # Get the Jacobian calculator function
-    dxdz_function = jacobian_calculator_func.get_jacobian_function()
+    dzdx_function = jacobian_calculator_func.get_jacobian_function()
 
     # Evaluate the Jacobian at x0
-    dxdz = dxdz_function(np.array(x0))
+    dzdx = dzdx_function(np.array(x0))
 
     # Take the inverse
-    dzdx = np.linalg.inv(dxdz)
+    dxdz = np.linalg.inv(dzdx)
 
-    # Compute the new O or F
+    # Compute the new O or F (chain rule: dy/dz = dy/dx @ dx/dz)
     if square_flag:  # F
-        O_z = dzdx.T @ O @ dzdx
+        O_z = dxdz.T @ O @ dxdz
     else:  # O
-        O_z = O @ dzdx
+        O_z = O @ dxdz
 
     # Set column/index names if data-frame was passed
     if isinstance(O_z, pd.DataFrame):
@@ -605,7 +805,7 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
             if square_flag:
                 O_z.index = z_state_names
 
-    return O_z, dzdx, dxdz_sym
+    return O_z, dxdz, dzdx_sym
 
 
 class ObservabilityMatrixImage:
@@ -630,11 +830,10 @@ class ObservabilityMatrixImage:
             # Default state names based on data-frame columns
             self.state_names_default = list(O.columns)
 
-            # Default sensor names based on data-frame 'sensor' index
-            sensor_names_all = list(np.unique(O.index.get_level_values('sensor')))
+            # Default sensor names based on data-frame 'sensor' index, in order of first appearance
             self.sensors = list(O.index.get_level_values('sensor'))
             self.time_steps = np.array(O.index.get_level_values('time_step'))
-            self.sensor_names_default = self.sensors[0:len(sensor_names_all)]
+            self.sensor_names_default = list(pd.unique(np.array(self.sensors, dtype=object)))
             self.time_steps_default = np.unique(self.time_steps)
         else:  # numpy matrix
             raise TypeError('n-sensor must be an integer value when O is given as a numpy matrix')
@@ -645,9 +844,9 @@ class ObservabilityMatrixImage:
         # Set state names
         if state_names is not None:
             if len(state_names) == self.n:
-                self.state_names = state_names.copy()
+                self.state_names = list(state_names)
             elif len(state_names) == 1:
-                self.state_names = ['$' + state_names[0] + '_{' + str(n) + '}$' for n in range(1, self.n + 1)]
+                self.state_names = ['${' + state_names[0] + '}_{' + str(n) + '}$' for n in range(1, self.n + 1)]
             else:
                 raise TypeError('state_names must be of length n or length 1')
         else:
@@ -657,36 +856,35 @@ class ObservabilityMatrixImage:
         LatexConverter = LatexStates()
         self.state_names = LatexConverter.convert_to_latex(self.state_names)
 
-        # Set sensor & measurement names
+        # Set sensor & measurement names. Each row is labeled from its own (sensor, time_step) index,
+        # so the labels are right whatever order the rows of O are in.
         if sensor_names is not None:
             if len(sensor_names) == self.n_sensor:
-                self.sensor_names = sensor_names.copy()
+                self.sensor_names = list(sensor_names)
                 self.sensor_names = LatexConverter.convert_to_latex(self.sensor_names, remove_dollar_signs=True)
-                self.measurement_names = []
-                for w in range(self.n_time_step):
-                    for p in range(self.n_sensor):
-                        m = '$' + self.sensor_names[p] + ',_{' + 'k=' + str(self.time_steps_default[w]) + '}$'
-                        self.measurement_names.append(m)
+
+                def label(p, k):
+                    return '$' + self.sensor_names[p] + ',_{' + 'k=' + str(k) + '}$'
 
             elif len(sensor_names) == 1:
                 self.sensor_names = [sensor_names[0] + '_{' + str(n) + '}$' for n in range(1, self.n_sensor + 1)]
                 self.sensor_names = LatexConverter.convert_to_latex(self.sensor_names, remove_dollar_signs=True)
-                self.measurement_names = []
-                for w in range(self.n_time_step):
-                    for p in range(self.n_sensor):
-                        m = '$' + sensor_names[0] + '_{' + str(p) + ',k=' + str(self.time_steps_default[w]) + '}$'
-                        self.measurement_names.append(m)
+
+                def label(p, k):
+                    return '${' + sensor_names[0] + '}_{' + str(p) + ',k=' + str(k) + '}$'
             else:
                 raise TypeError('sensor_names must be of length p or length 1')
 
         else:
             self.sensor_names = self.sensor_names_default.copy()
             self.sensor_names = LatexConverter.convert_to_latex(self.sensor_names, remove_dollar_signs=True)
-            self.measurement_names = []
-            for w in range(self.n_time_step):
-                for p in range(self.n_sensor):
-                    m = '$' + self.sensor_names[p] + '_{' + ',k=' + str(self.time_steps_default[w]) + '}$'
-                    self.measurement_names.append(m)
+
+            def label(p, k):
+                # braces keep a '_' in the sensor name (e.g. the default 'y_0') from making a double subscript
+                return '${' + self.sensor_names[p] + '}_{' + ',k=' + str(k) + '}$'
+
+        self.measurement_names = [label(self.sensor_names_default.index(s), k)
+                                  for s, k in zip(self.sensors, self.time_steps)]
 
     def plot(self, vmax_percentile=100, vmin_ratio=0.0, vmax_override=None, cmap='bwr', grid=True, scale=1.0, dpi=150,
              ax=None):
@@ -703,8 +901,8 @@ class ObservabilityMatrixImage:
         else:
             self.crange = vmax_override
 
-        # Display O
-        O_disp = self.O.values
+        # Display O (a copy: clipping must not modify self.O, and .values is read-only under pandas copy-on-write)
+        O_disp = self.O.to_numpy(dtype=float, copy=True)
         # O_disp = np.nan_to_num(np.sign(O_disp) * np.log(np.abs(O_disp)), nan=0.0)
         for n in range(self.n):
             for m in range(self.pw):
@@ -762,3 +960,54 @@ class ObservabilityMatrixImage:
         self.fig = fig
         self.ax = ax
         self.cbar = cbar
+
+
+def compute_observability(simulator, t_sim, x_sim, u_sim, R,
+                          w=6, eps=1e-4, lam=DEFAULT_LAM, use_jax=False):
+    """Compute sliding-window Fisher observability in one call.
+
+    Parameters
+    ----------
+    simulator : Simulator or JaxSimulator
+        A configured simulator instance.  Pass a ``JaxSimulator`` when
+        ``use_jax=True``.
+    t_sim, x_sim, u_sim : trajectory returned by simulator.simulate(..., return_full_output=True)
+    R : dict  — sensor noise covariance, e.g. {'r': 0.1}
+    w : int   — sliding window length (time steps)
+    eps : float — finite-difference perturbation size (ignored when use_jax=True)
+    lam : float — Chernoff regularization for Fisher inversion, (F + lam*I)^-1.
+        1/lam is the ceiling on the minimum error variance, so values near 1/lam
+        (1e8 for the default) indicate unobservable states.
+    use_jax : bool — if True, use JAX autodiff (exact Jacobians, faster for many windows).
+        Requires JAX to be installed and ``simulator`` to be a ``JaxSimulator`` whose
+        ``f`` and ``h`` functions are written with ``jax.numpy`` (``jnp``) instead of
+        ``numpy``.  See ``JaxSimulator`` for details.
+
+    Returns
+    -------
+    DataFrame with columns 'time', 'time_initial', and one column per state
+    containing the minimum error variance for each sliding window.
+    """
+    if use_jax:
+        try:
+            from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
+        except ImportError:
+            raise ImportError(
+                "JAX is not installed. Install it with: pip install jax[cpu]"
+            )
+        seom = JaxSlidingEmpiricalObservabilityMatrix(
+            simulator, t_sim, x_sim, u_sim, w=w)
+    else:
+        seom = SlidingEmpiricalObservabilityMatrix(
+            simulator, t_sim, x_sim, u_sim, w=w, eps=eps)
+    sfo = SlidingFisherObservability(
+        seom.O_df_sliding,
+        time=seom.t_sim,
+        R=R,
+        lam=lam,
+        states=simulator.state_names,
+        sensors=simulator.measurement_names,
+        time_steps=np.arange(w),
+        w=None,
+    )
+    return sfo.get_minimum_error_variance()

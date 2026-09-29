@@ -17,8 +17,8 @@ class Simulator(object):
 
         """ Simulator.
 
-        :param callable f: dynamics function f(X, U, t)
-        :param callable h: measurement function h(X, U, t)
+        :param callable f: dynamics function f(X, U) returning the list of state derivatives
+        :param callable h: measurement function h(X, U) returning the list of measurements
         :param float dt: sampling time in seconds
         :param int n: number of states, optional but cannot be set if state_names is set
         :param int m: number of inputs, optional but cannot be set if input_names is set
@@ -59,7 +59,7 @@ class Simulator(object):
             self.input_names = ['u_' + str(m) for m in range(self.m)]
         else:  # input names given
             if m is not None:
-                raise ValueError('cannot set in and n')
+                raise ValueError('cannot set input_names and m')
 
             self.input_names = list(input_names)
             self.m = len(self.input_names)
@@ -207,18 +207,15 @@ class Simulator(object):
         :param t: current time
         """
 
-        mpc_horizon = self.mpc._settings.n_horizon
-
         # Set current step index
         t_s = float(np.asarray(t).squeeze())
         dt_s = float(np.asarray(self.dt).squeeze())
         k_step = int(np.rint(t_s / dt_s))
-        if k_step >= mpc_horizon:  # point is beyond end of input data
-            k_step = mpc_horizon - 1  # set point beyond input data to last point
 
-        # Update current set-point
+        # Update current set-point, holding the last point beyond the end of the set-point data
         for n, state_name in enumerate(self.state_names):
-            self.simulator_tvp_template[state_name + '_set'] = self.setpoint[state_name][k_step]
+            setpoint = self.setpoint[state_name]
+            self.simulator_tvp_template[state_name + '_set'] = setpoint[min(k_step, len(setpoint) - 1)]
 
         return self.simulator_tvp_template
 
@@ -233,15 +230,12 @@ class Simulator(object):
         dt_s = float(np.asarray(self.dt).squeeze())
         k_step = int(np.rint(t_s / dt_s))
 
-        # Update set-point time horizon
+        # Update set-point time horizon, holding the last point beyond the end of the set-point data
         for k in range(mpc_horizon + 1):
-            k_set = k_step + k
-            if k_set >= self.w:  # horizon is beyond end of input data
-                k_set = self.w - 1  # set part of horizon beyond input data to last point
-
-            # Update each set-point over time horizon
             for n, state_name in enumerate(self.state_names):
-                self.mpc_tvp_template['_tvp', k, state_name + '_set'] = self.setpoint[state_name][k_set]
+                setpoint = self.setpoint[state_name]
+                k_set = min(k_step + k, len(setpoint) - 1)
+                self.mpc_tvp_template['_tvp', k, state_name + '_set'] = setpoint[k_set]
 
         return self.mpc_tvp_template
 
@@ -252,13 +246,14 @@ class Simulator(object):
         if x0 is not None:  # initial state given
             if isinstance(x0, dict):  # in dict format
                 SetDict().set_dict_with_overwrite(self.x0, x0)  # update only the states in the dict given
-            elif isinstance(x0, list) or isinstance(x0, tuple) or (
-            x0, np.ndarray):  # list, tuple,  or numpy array format
-                x0 = np.array(x0).squeeze()
+            elif isinstance(x0, (list, tuple, np.ndarray)):  # list, tuple,  or numpy array format
+                x0 = np.ravel(np.array(x0))  # 1-D, also for a single state
+                if x0.shape[0] != len(self.x0):
+                    raise ValueError(f'x0 has {x0.shape[0]} values but the system has {len(self.x0)} states')
                 for n, key in enumerate(self.x0.keys()):  # each state
                     self.x0[key] = x0[n]
             else:
-                raise Exception('x0 must be either a dict, tuple, list, or numpy array')
+                raise ValueError('x0 must be either a dict, tuple, list, or numpy array')
 
     def update_dict(self, data=None, name=None):
         """ Update.
@@ -268,19 +263,20 @@ class Simulator(object):
 
         if data is not None:  # data given
             if isinstance(data, dict):  # in dict format
+                data = {k: np.ravel(np.asarray(v, dtype=float)) for k, v in data.items()}  # lists/scalars -> 1-D arrays
                 SetDict().set_dict_with_overwrite(update, data)  # update only the inputs in the dict given
 
                 # Normalize unset keys to be the length of the set keys be repeating the 1st element
                 unset_key = set(update.keys()) - set(data.keys())  # find keys that were not set
                 set_key = set(data.keys())  # find keys that were set
-                if unset_key != set_key:
-                    w = data[list(set_key)[0]].squeeze().shape[0]  # size of 1st set key
+                if unset_key and set_key:  # some keys set, others not
+                    w = data[list(set_key)[0]].shape[0]  # size of 1st set key
                     for k in unset_key:  # update each unset key
                         update[k] = update[k][0] * np.ones(w)
 
             elif isinstance(data, list) or isinstance(data, tuple):  # list or tuple format, each input vector in each element
                 for n, k in enumerate(update.keys()):  # each state
-                    update[k] = data[n]
+                    update[k] = np.ravel(np.asarray(data[n], dtype=float))
             elif isinstance(data, np.ndarray):  # numpy array format given as matrix where columns are the different inputs
                 if len(data.shape) <= 1:  # given as 1d array, so convert to column vector
                     data = np.atleast_2d(data).T
@@ -289,23 +285,23 @@ class Simulator(object):
                     update[key] = data[:, n]
 
             else:
-                raise Exception(name + ' must be either a dict, tuple, list, or numpy array')
+                raise ValueError(f'{name} must be either a dict, tuple, list, or numpy array')
 
         # Make sure inputs are the same size
         points = np.array([update[key].shape[0] for key in update.keys()])
         points_check = points == points[0]
         if not np.all(points_check):
-            raise Exception(name + ' not the same size')
+            raise ValueError(f'{name} inputs are not all the same length')
 
     def simulate(self, x0=None, u=None, aux=None, mpc=False, return_full_output=False):
         """
         Simulate the system.
 
-        :params x0: initial state dict or array
-        :params u: input dict or array, if True then mpc must be None
-        :params aux: auxiliary input
-        :params mpc: boolean to run MPC, if True then u must be None
-        :params return_full_output: boolean to run (time, x, u, y) instead of y
+        :param x0: initial state dict or array
+        :param u: input dict or array, if True then mpc must be None
+        :param aux: auxiliary input
+        :param mpc: boolean to run MPC, if True then u must be None
+        :param return_full_output: boolean to run (time, x, u, y) instead of y
         """
 
         if (mpc is True) and (u is not None):

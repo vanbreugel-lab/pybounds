@@ -5,6 +5,12 @@ Python implementation of BOUNDS: Bounding Observability for Uncertain Nonlinear 
 <p align="center">
     <a href="https://pypi.org/project/pybounds/">
         <img src="https://badge.fury.io/py/pybounds.svg" alt="PyPI version" height="18"></a>
+    <a href="https://github.com/vanbreugel-lab/pybounds/actions/workflows/tests.yaml">
+        <img src="https://github.com/vanbreugel-lab/pybounds/actions/workflows/tests.yaml/badge.svg?branch=main" alt="Tests" height="18"></a>
+    <a href="https://codecov.io/gh/vanbreugel-lab/pybounds">
+        <img src="https://codecov.io/gh/vanbreugel-lab/pybounds/branch/main/graph/badge.svg" alt="Coverage" height="18"></a>
+    <a href="https://pybounds.readthedocs.io/en/latest/">
+        <img src="https://readthedocs.org/projects/pybounds/badge/?version=latest" alt="Docs" height="18"></a>
 </p>
 
 ## Introduction
@@ -27,13 +33,73 @@ or from source, for development, after cloning the repo:
 pip install -e .
 ```
 
+## Quick Start
+
+To demonstrate pybounds with a simple example we use a downward-pointing camera moving horizontally with acceleration that is controlled directly with control inputs (u). The two states are ground speed `g` and (constant) altitude `d`, and the only measurement is the ventral optic flow ratio `r = g/d`. We use pybounds to understand when `g` and `d` are observable. 
+
+See notebooks in next section for more detailed usage examples. 
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+import pybounds
+
+# 1. Define continuous time system dynamics f(X, U) and measurement h(X, U)
+def f(X, U):         # states: gap g, distance d — input u drives g
+    return [U[0], 0] # returns: d/dt(g), d/dt(d) 
+
+def h(X, U):        # monocular camera measures the g/d ratio
+    return [X[0] / X[1]]
+
+# 2. Simulate a trajectory
+sim = pybounds.Simulator(f, h, dt=0.01,
+                         state_names=['g', 'd'], input_names=['u'],
+                         measurement_names=['r'])
+t, x, u, _ = sim.simulate(x0={'g': 2.0, 'd': 3.0},
+                           u={'u': 0.1 * np.ones(500)},
+                           return_full_output=True)
+
+# 3. Compute sliding-window observability and Fisher information
+ev = pybounds.compute_observability(sim, t, x, u, R={'r': 0.1})
+
+# 4. Plot minimum error variance over time for each state
+ev.set_index('time')[['g', 'd']].plot(logy=True, ylabel='Min. error variance')
+plt.show()
+```
+
+The Fisher information matrix F is inverted as (F + λI)⁻¹, with λ set by the `lam` argument (default `1e-8`). 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
+
 ## Notebook examples
 
-For a simple system:
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic fow measurements: [mono_camera_example.ipynb](examples%2Fmono_camera_example.ipynb)
+### Basic Examples
 
-For a more complex system:
-*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples%2Ffly_wind_example.ipynb)
+These notebooks provide a more detailed example of pybounds functionality including: 
+* How to use model predictive control to drive systems along specified trajectories 
+* Demonstration of what happens inside the `pybounds.compute_observability` wrapper function, allowing for detailed investigations of the observability calculations
+
+**Examples using pybounds with continuous time dynamics**, see these notebook examples:
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example.ipynb) Monocular camera with optic flow measurements: [mono_camera_example.ipynb](examples/mono_camera_example.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example.ipynb) Fly-wind: [fly_wind_example.ipynb](examples/fly_wind_example.ipynb)
+
+### JAX Accelerated Examples
+
+pybounds includes a JAX backend (`JaxSimulator`, `JaxSlidingEmpiricalObservabilityMatrix`) that replaces the numerical finite-difference Jacobian with exact autodiff via `jax.vmap` + `jax.jacfwd`. The simulation and all downstream analysis (Fisher information, plotting) are unchanged.
+
+**When JAX helps most:** the speedup scales with the number of sliding windows. Short trajectories with few windows see modest gains; long trajectories benefit dramatically.
+
+| System | States | Windows | Legacy | JAX (hot) | Speedup |
+|--------|-------:|-------:|-------:|----------:|--------:|
+| Mono-camera | 2 | 895 | ~21 s | ~1.1 s | **~19×** |
+| Fly-wind | 18 | 37 | ~6 s | ~2.6 s | **~2.4×** |
+
+**To use the JAX backend**, install JAX and rewrite your dynamics `f` and measurement `h` using `jax.numpy` instead of `numpy`. See the notebooks below for worked examples.
+
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example_jax.ipynb) Mono-camera — JAX accelerated: [mono_camera_example_jax.ipynb](examples/mono_camera_example_jax.ipynb)
+*  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example_jax.ipynb) Fly-wind — JAX accelerated: [fly_wind_example_jax.ipynb](examples/fly_wind_example_jax.ipynb)
+
+### Using a Custom Simulator
+
+This has received the least development, however, a working tutorial can be found [here](https://github.com/florisvb/Nonlinear_and_Data_Driven_Estimation/blob/main/Lesson_8_Empirical_Nonlinear_Observability/C_pybounds_with_custom_simulator_tutorial.ipynb).
 
 ## Citation
 

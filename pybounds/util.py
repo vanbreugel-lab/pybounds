@@ -116,7 +116,7 @@ class LatexStates:
                      'wz': r'$w_z$',
                      'ax': r'$ax$',
                      'ay': r'$ay$',
-                     'beta': r'$\beta',
+                     'beta': r'$\beta$',
                      'thetadot': r'$\dot{\theta}$',
                      'theta_dot': r'$\dot{\theta}$',
                      'psidot': r'$\dot{\psi}$',
@@ -184,8 +184,6 @@ def colorline(x, y, z, ax=None, cmap=plt.get_cmap('copper'), norm=None, linewidt
     # Set normalization
     if norm is None:
         norm = plt.Normalize(np.min(z), np.max(z))
-
-    print(norm)
 
     # Make segments
     segments = make_segments(x, y)

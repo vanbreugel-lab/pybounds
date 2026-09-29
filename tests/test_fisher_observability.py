@@ -1,0 +1,193 @@
+import numpy as np
+import pandas as pd
+import pytest
+import pybounds
+
+
+class TestFisherReturnTypes:
+
+    def test_returns_three_tuple(self, fisher_obs):
+        result = fisher_obs.get_fisher_information()
+        assert len(result) == 3
+
+    def test_F_is_dataframe(self, fisher_obs):
+        import pandas as pd
+        F, _, _ = fisher_obs.get_fisher_information()
+        assert isinstance(F, pd.DataFrame)
+
+    def test_F_inv_is_dataframe(self, fisher_obs):
+        import pandas as pd
+        _, F_inv, _ = fisher_obs.get_fisher_information()
+        assert isinstance(F_inv, pd.DataFrame)
+
+    def test_R_is_dataframe(self, fisher_obs):
+        import pandas as pd
+        _, _, R = fisher_obs.get_fisher_information()
+        assert isinstance(R, pd.DataFrame)
+
+
+class TestFisherShapes:
+
+    def test_F_shape(self, fisher_obs):
+        F, _, _ = fisher_obs.get_fisher_information()
+        assert F.shape == (2, 2)
+
+    def test_F_inv_shape(self, fisher_obs):
+        _, F_inv, _ = fisher_obs.get_fisher_information()
+        assert F_inv.shape == (2, 2)
+
+    def test_F_columns(self, fisher_obs):
+        F, _, _ = fisher_obs.get_fisher_information()
+        assert list(F.columns) == ['g', 'd']
+
+    def test_F_index(self, fisher_obs):
+        F, _, _ = fisher_obs.get_fisher_information()
+        assert list(F.index) == ['g', 'd']
+
+    def test_F_inv_columns(self, fisher_obs):
+        _, F_inv, _ = fisher_obs.get_fisher_information()
+        assert list(F_inv.columns) == ['g', 'd']
+
+
+class TestFisherMathematicalProperties:
+
+    def test_F_is_symmetric(self, fisher_obs):
+        F, _, _ = fisher_obs.get_fisher_information()
+        assert np.allclose(F.values, F.values.T, atol=1e-10)
+
+    def test_F_is_positive_semidefinite(self, fisher_obs):
+        F, _, _ = fisher_obs.get_fisher_information()
+        eigenvalues = np.linalg.eigvalsh(F.values)
+        assert np.all(eigenvalues >= -1e-10), \
+            f"F has negative eigenvalues: {eigenvalues}"
+
+    def test_F_inv_is_symmetric(self, fisher_obs):
+        _, F_inv, _ = fisher_obs.get_fisher_information()
+        assert np.allclose(F_inv.values, F_inv.values.T, atol=1e-8)
+
+    def test_regularized_F_times_F_inv_is_identity(self, fisher_obs):
+        """(F + lam*I) @ F_inv should be approximately I."""
+        F, F_inv, _ = fisher_obs.get_fisher_information()
+        lam = 1e-8
+        F_reg = F.values + lam * np.eye(2)
+        product = F_reg @ F_inv.values
+        assert np.allclose(product, np.eye(2), atol=1e-6)
+
+    def test_error_variance_is_positive(self, fisher_obs):
+        assert np.all(fisher_obs.error_variance.values > 0)
+
+    def test_error_variance_has_state_columns(self, fisher_obs):
+        assert 'g' in fisher_obs.error_variance.columns
+        assert 'd' in fisher_obs.error_variance.columns
+
+
+class TestFisherParameterEffects:
+
+    def test_R_dict_sets_diagonal(self, eom):
+        """R={'r': 0.1} should give diagonal entries of 0.1."""
+        FO = pybounds.FisherObservability(eom.O_df, R={'r': 0.1}, lam=1e-8)
+        _, _, R = FO.get_fisher_information()
+        diag_vals = np.diag(R.values)
+        assert np.allclose(diag_vals, 0.1, atol=1e-10)
+
+    def test_larger_R_increases_error_variance(self, eom):
+        """More sensor noise → larger minimum error variance (Cramér-Rao)."""
+        FO_low = pybounds.FisherObservability(eom.O_df, R={'r': 0.01}, lam=1e-8)
+        FO_high = pybounds.FisherObservability(eom.O_df, R={'r': 1.0}, lam=1e-8)
+        ev_low = FO_low.error_variance.values
+        ev_high = FO_high.error_variance.values
+        assert np.all(ev_high > ev_low)
+
+    def test_ndarray_O_matches_dataframe(self, eom):
+        """A plain array O should give the same F and error variance as the equivalent data-frame."""
+        FO_df = pybounds.FisherObservability(eom.O_df, R=0.1, lam=1e-8)
+        FO_np = pybounds.FisherObservability(eom.O_df.values, R=0.1, lam=1e-8)
+        assert FO_np.w == eom.O_df.shape[0]
+        assert list(FO_np.F.columns) == ['x_0', 'x_1']
+        assert np.allclose(FO_np.F.values, FO_df.F.values)
+        assert np.allclose(FO_np.error_variance.values, FO_df.error_variance.values)
+
+    def test_ndarray_O_time_step_subset(self, eom):
+        FO = pybounds.FisherObservability(eom.O_df.values, R=0.1, lam=1e-8, time_steps=[0, 1, 2])
+        assert FO.O.shape == (3, 2)
+        assert np.allclose(FO.O.values, eom.O_df.values[0:3])
+
+    @pytest.mark.parametrize('lam_kwargs', [{}, {'lam': None}])
+    def test_default_lam_matches_explicit_1e_8(self, eom, lam_kwargs):
+        FO_default = pybounds.FisherObservability(eom.O_df, R={'r': 0.1}, **lam_kwargs)
+        FO_explicit = pybounds.FisherObservability(eom.O_df, R={'r': 0.1}, lam=1e-8)
+        assert FO_default.lam == 1e-8
+        assert np.allclose(FO_default.error_variance.values, FO_explicit.error_variance.values)
+
+    def test_default_lam_handles_singular_F(self):
+        """An exactly unobservable state (zero column in O) should not make the default inverse fail."""
+        O = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])
+        FO = pybounds.FisherObservability(O, R=1.0)
+        assert np.all(np.isfinite(FO.error_variance.values))
+
+    @pytest.mark.parametrize('lam', [1e-8, 1e-2, 1.0])
+    def test_error_variance_ceiling_is_one_over_lam(self, lam):
+        """1/lam bounds every error variance, and an unobservable state sits at the ceiling."""
+        O = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])  # x_1 is unobservable
+        ev = pybounds.FisherObservability(O, R=1.0, lam=lam).error_variance
+        assert np.all(ev.values <= 1 / lam)
+        assert np.isclose(ev['x_1'].item(), 1 / lam)
+
+    def test_invalid_O_type_raises(self, eom):
+        """Passing a plain list (no .shape) raises AttributeError before the isinstance check."""
+        with pytest.raises((TypeError, AttributeError)):
+            pybounds.FisherObservability([[1, 2], [3, 4]], R=0.1, lam=1e-8)
+
+
+def _two_sensor_O():
+    """O with sensors listed out of alphabetical order ('r' before 'a'), 3 time steps."""
+    rng = np.random.default_rng(0)
+    index = pd.MultiIndex.from_tuples([(s, k) for k in range(3) for s in ('r', 'a')],
+                                      names=['sensor', 'time_step'])
+    return pd.DataFrame(rng.normal(size=(6, 2)), index=index, columns=['g', 'd'])
+
+
+def _manual_error_variance(O, r_var, lam=1e-8):
+    R_inv = np.diag([1 / r_var[s] for s in O.index.get_level_values('sensor')])
+    F = O.values.T @ R_inv @ O.values
+    return np.diag(np.linalg.inv(F + lam * np.eye(O.shape[1])))
+
+
+class TestFisherMatrixR:
+    R_VAR = {'r': 0.01, 'a': 100.0}
+
+    def _R_df(self, O):
+        diag = [self.R_VAR[s] for s in O.index.get_level_values('sensor')]
+        return pd.DataFrame(np.diag(diag), index=O.index, columns=O.index)
+
+    def test_dataframe_and_array_R_match_dict(self):
+        O = _two_sensor_O()
+        expected = _manual_error_variance(O, self.R_VAR)
+        R_df = self._R_df(O)
+        for R in (self.R_VAR, R_df, R_df.values):
+            ev = pybounds.FisherObservability(O, R=R).error_variance.values.ravel()
+            np.testing.assert_allclose(ev, expected)
+
+    def test_full_size_R_is_subset_with_O(self):
+        O = _two_sensor_O()
+        expected = _manual_error_variance(O.loc[(slice(None), [0, 1]), :], self.R_VAR)
+        R_df = self._R_df(O)
+        for R in (R_df, R_df.values):
+            ev = pybounds.FisherObservability(O, R=R, time_steps=[0, 1]).error_variance.values.ravel()
+            np.testing.assert_allclose(ev, expected)
+
+    def test_wrong_size_R_array_raises(self):
+        with pytest.raises(ValueError, match='R array must be'):
+            pybounds.FisherObservability(_two_sensor_O(), R=np.eye(4))
+
+
+class TestFisherSingleRow:
+
+    @pytest.mark.parametrize('R', [{'r': 0.2, 'a': 100.0}, 0.2])
+    def test_single_selected_row(self, R):
+        """Selecting one sensor at one time-step leaves a 1x1 R, which used to break the F matmul."""
+        O = _two_sensor_O()
+        FO = pybounds.FisherObservability(O, R=R, sensors=['r'], time_steps=[2])
+        assert FO.R.shape == (1, 1)
+        row = O.loc[[('r', 2)]].values
+        np.testing.assert_allclose(FO.F.values, row.T @ row / 0.2)
