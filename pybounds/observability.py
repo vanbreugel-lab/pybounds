@@ -834,7 +834,7 @@ class ObservabilityMatrixImage:
             if len(state_names) == self.n:
                 self.state_names = state_names.copy()
             elif len(state_names) == 1:
-                self.state_names = ['$' + state_names[0] + '_{' + str(n) + '}$' for n in range(1, self.n + 1)]
+                self.state_names = ['${' + state_names[0] + '}_{' + str(n) + '}$' for n in range(1, self.n + 1)]
             else:
                 raise TypeError('state_names must be of length n or length 1')
         else:
@@ -861,7 +861,7 @@ class ObservabilityMatrixImage:
                 self.measurement_names = []
                 for w in range(self.n_time_step):
                     for p in range(self.n_sensor):
-                        m = '$' + sensor_names[0] + '_{' + str(p) + ',k=' + str(self.time_steps_default[w]) + '}$'
+                        m = '${' + sensor_names[0] + '}_{' + str(p) + ',k=' + str(self.time_steps_default[w]) + '}$'
                         self.measurement_names.append(m)
             else:
                 raise TypeError('sensor_names must be of length p or length 1')
@@ -872,7 +872,8 @@ class ObservabilityMatrixImage:
             self.measurement_names = []
             for w in range(self.n_time_step):
                 for p in range(self.n_sensor):
-                    m = '$' + self.sensor_names[p] + '_{' + ',k=' + str(self.time_steps_default[w]) + '}$'
+                    # braces keep a '_' in the sensor name (e.g. the default 'y_0') from making a double subscript
+                    m = '${' + self.sensor_names[p] + '}_{' + ',k=' + str(self.time_steps_default[w]) + '}$'
                     self.measurement_names.append(m)
 
     def plot(self, vmax_percentile=100, vmin_ratio=0.0, vmax_override=None, cmap='bwr', grid=True, scale=1.0, dpi=150,

@@ -71,3 +71,22 @@ class TestObservabilityMatrixImagePlot:
         OI.plot(ax=ax)
         assert OI.fig is None
         plt.close('all')
+
+
+def _underscore_sensor_O():
+    """O with the default-style sensor name 'y_0' (and a state name with an underscore)."""
+    sim = pybounds.Simulator(lambda X, U: [U[0], 0 * U[0]], lambda X, U: [X[0] / X[1]], dt=0.01,
+                             state_names=['g', 'd'], input_names=['u'])   # default measurement name 'y_0'
+    return pybounds.EmpiricalObservabilityMatrix(sim, {'g': 2.0, 'd': 3.0}, {'u': 0.1 * np.ones(4)}, eps=1e-4).O_df
+
+
+class TestObservabilityMatrixImageLabels:
+
+    @pytest.mark.parametrize('kwargs', [{}, {'sensor_names': ['y_a']}, {'state_names': ['x_s']}])
+    def test_names_with_underscores_render(self, kwargs):
+        O = _underscore_sensor_O()
+        assert set(O.index.get_level_values('sensor')) == {'y_0'}
+        OI = pybounds.ObservabilityMatrixImage(O, **kwargs)
+        OI.plot()
+        OI.fig.canvas.draw()   # mathtext labels are only parsed when drawn
+        plt.close(OI.fig)
