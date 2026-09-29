@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import pybounds
 from conftest import N_STEPS_SLIDING, WINDOW_SIZE
 
 
@@ -59,3 +60,11 @@ class TestSlidingFisherValues:
     def test_fo_list_length(self, sliding_fisher):
         expected = N_STEPS_SLIDING - WINDOW_SIZE + 1
         assert len(sliding_fisher.FO) == expected
+
+
+class TestSlidingFisherDefaults:
+
+    def test_default_lam_matches_explicit_1e_8(self, seom):
+        sfo_default = pybounds.SlidingFisherObservability(seom.O_df_sliding, R={'r': 0.1})
+        sfo_explicit = pybounds.SlidingFisherObservability(seom.O_df_sliding, R={'r': 0.1}, lam=1e-8)
+        assert np.allclose(sfo_default.EV[['g', 'd']].values, sfo_explicit.EV[['g', 'd']].values)

@@ -589,7 +589,7 @@ class FisherObservability:
 
 
 class SlidingFisherObservability:
-    def __init__(self, O_list, R=None, lam=1e6, time=None,
+    def __init__(self, O_list, R=None, lam=1e-8, time=None,
                  states=None, sensors=None, time_steps=None, w=None):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
