@@ -84,6 +84,14 @@ def _compute_window(args):
     return EOM.O.copy(), EOM.O_df.copy(), window_data
 
 
+def _reject_jax_simulator(simulator, cls_name):
+    """Raise a clear error when a JaxSimulator is passed to a CasADi-backend class."""
+    jax_module = sys.modules.get(f'{__package__}.jax_simulator')
+    if jax_module is not None and isinstance(simulator, jax_module.JaxSimulator):
+        raise TypeError(f'{cls_name} does not accept a JaxSimulator; use Jax{cls_name} instead '
+                        '(or compute_observability(..., use_jax=True)).')
+
+
 def _ordered_values(d, names, label):
     """Values of dict d ordered by the simulator's names (insertion order if it has none)."""
     if names is None:
@@ -132,6 +140,7 @@ class EmpiricalObservabilityMatrix(_TransformJacobianAliases):
         """
 
         # Store inputs
+        _reject_jax_simulator(simulator, 'EmpiricalObservabilityMatrix')
         self.simulator = simulator
         self.aux = aux
         self.eps = eps
@@ -322,6 +331,7 @@ class SlidingEmpiricalObservabilityMatrix:
             Defaults to min(n_windows, os.cpu_count()).
         """
 
+        _reject_jax_simulator(simulator, 'SlidingEmpiricalObservabilityMatrix')
         self.simulator = simulator
         self.eps = eps
         self.parallel_sliding = parallel_sliding

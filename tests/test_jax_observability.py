@@ -490,3 +490,24 @@ class TestJaxSlidingWindowSize:
     def test_nonpositive_w_raises(self, jax_sim, seom, w):
         with pytest.raises(ValueError, match='must be at least 1'):
             JaxSlidingEmpiricalObservabilityMatrix(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, w=w)
+
+
+class TestBackendMismatch:
+    def test_casadi_classes_reject_jax_simulator(self, jax_sim, seom):
+        with pytest.raises(TypeError, match='use JaxEmpiricalObservabilityMatrix instead'):
+            pybounds.EmpiricalObservabilityMatrix(jax_sim, [2.0, 3.0], 0.1 * np.ones((5, 1)))
+        with pytest.raises(TypeError, match='use JaxSlidingEmpiricalObservabilityMatrix instead'):
+            pybounds.SlidingEmpiricalObservabilityMatrix(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE)
+
+    def test_jax_classes_require_jax_simulator(self, simulator, seom):
+        with pytest.raises(TypeError, match='requires a JaxSimulator, got Simulator'):
+            JaxEmpiricalObservabilityMatrix(simulator, [2.0, 3.0], 0.1 * np.ones((5, 1)))
+        with pytest.raises(TypeError, match='use SlidingEmpiricalObservabilityMatrix instead'):
+            JaxSlidingEmpiricalObservabilityMatrix(simulator, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE)
+
+    @pytest.mark.parametrize('use_jax', [False, True])
+    def test_compute_observability_flag_mismatch(self, simulator, jax_sim, seom, use_jax):
+        sim = simulator if use_jax else jax_sim   # deliberately the wrong backend for the flag
+        with pytest.raises(TypeError, match=f'use_jax={not use_jax}'):
+            pybounds.compute_observability(sim, seom.t_sim, seom.x_sim, seom.u_sim, R={'r': 0.1},
+                                           w=WINDOW_SIZE, use_jax=use_jax)

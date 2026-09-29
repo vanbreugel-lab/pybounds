@@ -253,6 +253,7 @@ class JaxEmpiricalObservabilityMatrix(_TransformJacobianAliases):
     @_with_x64
     def __init__(self, jax_simulator, x0, u_seq, eps=None, aux=None,
                  z_function=None, z_state_names=None):
+        _require_jax_simulator(jax_simulator, 'JaxEmpiricalObservabilityMatrix')
         self.jax_simulator = jax_simulator
         self.eps = eps  # kept for API compat; not used
 
@@ -356,6 +357,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
     @_with_x64
     def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w=None, aux_list=None,
                  z_function=None, z_state_names=None):
+        _require_jax_simulator(jax_simulator, 'JaxSlidingEmpiricalObservabilityMatrix')
         self.jax_simulator = jax_simulator
         self.n = jax_simulator.n
         self.p = jax_simulator.p
@@ -480,6 +482,13 @@ class JaxSlidingEmpiricalObservabilityMatrix:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _require_jax_simulator(simulator, cls_name):
+    """Raise a clear error when a non-JAX simulator is passed to a JAX-backend class."""
+    if not isinstance(simulator, JaxSimulator):
+        raise TypeError(f'{cls_name} requires a JaxSimulator, got {type(simulator).__name__}; '
+                        f'use {cls_name[3:]} instead (or compute_observability(..., use_jax=False)).')
+
 
 def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names):
     """Apply ``transform_states`` to each O data-frame at its own x0.
