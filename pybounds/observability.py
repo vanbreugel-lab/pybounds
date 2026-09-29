@@ -55,6 +55,16 @@ def _compute_window(args):
     return EOM.O.copy(), EOM.O_df.copy(), window_data
 
 
+def _ordered_values(d, names, label):
+    """Values of dict d ordered by the simulator's names (insertion order if it has none)."""
+    if names is None:
+        return list(d.values())
+    names = list(names)
+    if set(d.keys()) != set(names):
+        raise ValueError(f'{label} keys {list(d.keys())} must match the simulator names {names}')
+    return [d[k] for k in names]
+
+
 class EmpiricalObservabilityMatrix:
     def __init__(self, simulator, x0, u, aux=None, eps=1e-5, parallel=False,
                  z_function=None, z_state_names=None):
@@ -83,12 +93,12 @@ class EmpiricalObservabilityMatrix:
         self.parallel = parallel
 
         if isinstance(x0, dict):
-            self.x0 = np.array(list(x0.values()))
+            self.x0 = np.array(_ordered_values(x0, getattr(simulator, 'state_names', None), 'x0'))
         else:
             self.x0 = np.array(x0).squeeze()
 
         if isinstance(u, dict):
-            self.u = np.vstack(list(u.values())).T
+            self.u = np.vstack(_ordered_values(u, getattr(simulator, 'input_names', None), 'u')).T
         else:
             self.u = np.array(u)
 
@@ -282,12 +292,12 @@ class SlidingEmpiricalObservabilityMatrix:
 
         # Make x_sim & u_sim arrays
         if isinstance(x_sim, dict):
-            self.x_sim = np.vstack((list(x_sim.values()))).T
+            self.x_sim = np.vstack(_ordered_values(x_sim, getattr(simulator, 'state_names', None), 'x_sim')).T
         else:
             self.x_sim = np.array(x_sim).squeeze()
 
         if isinstance(u_sim, dict):
-            self.u_sim = np.vstack(list(u_sim.values())).T
+            self.u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T
         else:
             self.u_sim = np.array(u_sim)
 

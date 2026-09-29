@@ -120,3 +120,15 @@ class TestSEOMParallel:
         assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
         for O_par, O_seq in zip(seom_par.O_sliding, seom_seq.O_sliding):
             assert np.allclose(O_par, O_seq)
+
+
+class TestSEOMDictOrder:
+
+    def test_dict_key_order_does_not_matter(self, simulator, simulation_output, seom):
+        t_sim, x_sim, u_sim, _ = simulation_output
+        x_rev = {k: x_sim[k][:N_STEPS_SLIDING] for k in ['d', 'g']}
+        u_s = {k: v[:N_STEPS_SLIDING] for k, v in u_sim.items()}
+        seom_rev = pybounds.SlidingEmpiricalObservabilityMatrix(
+            simulator, t_sim[:N_STEPS_SLIDING], x_rev, u_s, w=WINDOW_SIZE, eps=EPS)
+        for O_rev, O in zip(seom_rev.O_sliding, seom.O_sliding):
+            assert np.allclose(O_rev, O)

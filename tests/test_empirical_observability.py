@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import pybounds
-from conftest import N_STEPS, EPS, STATE_NAMES, MEASUREMENT_NAMES, AnalyticSimulator
+from conftest import N_STEPS, EPS, DT, STATE_NAMES, MEASUREMENT_NAMES, AnalyticSimulator
 
 
 class TestEOMTypes:
@@ -94,3 +94,27 @@ class TestEOMParallel:
         assert eom_par.parallel is True
         assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
         assert np.allclose(eom_par.O, eom_seq.O)
+
+
+class TestEOMDictOrder:
+
+    def test_x0_dict_key_order_does_not_matter(self, simulator, eom):
+        u = {'u': 0.1 * np.ones(N_STEPS)}
+        eom_rev = pybounds.EmpiricalObservabilityMatrix(simulator, {'d': 3.0, 'g': 2.0}, u, eps=EPS)
+        assert np.allclose(eom_rev.x0, [2.0, 3.0])
+        assert np.allclose(eom_rev.O, eom.O)
+
+    def test_u_dict_key_order_does_not_matter(self):
+        sim = pybounds.Simulator(lambda X, U: [U[0], U[1]], lambda X, U: [X[0] / X[1]], dt=DT,
+                                 state_names=['g', 'd'], input_names=['ug', 'ud'], measurement_names=['r'])
+        x0 = {'g': 2.0, 'd': 3.0}
+        u = {'ug': 0.5 * np.ones(20), 'ud': -0.1 * np.ones(20)}
+        u_rev = {'ud': u['ud'], 'ug': u['ug']}
+        eom_a = pybounds.EmpiricalObservabilityMatrix(sim, x0, u, eps=EPS)
+        eom_b = pybounds.EmpiricalObservabilityMatrix(sim, x0, u_rev, eps=EPS)
+        assert np.allclose(eom_a.y_nominal, eom_b.y_nominal)
+        assert np.allclose(eom_a.O, eom_b.O)
+
+    def test_mismatched_x0_keys_raise(self, simulator):
+        with pytest.raises(ValueError, match='x0 keys'):
+            pybounds.EmpiricalObservabilityMatrix(simulator, {'g': 2.0, 'z': 3.0}, {'u': np.zeros(5)})
