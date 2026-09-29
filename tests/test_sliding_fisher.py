@@ -105,3 +105,16 @@ class TestSlidingFisherSingleWindow:
         ev = pybounds.SlidingFisherObservability([O], R=0.1).get_minimum_error_variance()
         assert list(ev.columns[:2]) == ['time', 'time_initial']
         assert ev['time'].item() == 2
+
+
+class TestSlidingFisherForceRScalar:
+
+    def test_force_R_scalar_matches_matrix_R(self, seom):
+        kwargs = dict(R=0.1, time=seom.t_sim, lam=1e-8)
+        ev = pybounds.SlidingFisherObservability(seom.O_df_sliding, **kwargs).EV_aligned
+        ev_forced = pybounds.SlidingFisherObservability(seom.O_df_sliding, force_R_scalar=True, **kwargs).EV_aligned
+        pd.testing.assert_frame_equal(ev_forced, ev)
+
+    def test_force_R_scalar_rejects_dict_R(self, seom):
+        with pytest.raises(Exception, match='R must be a scalar'):
+            pybounds.SlidingFisherObservability(seom.O_df_sliding, R={'r': 0.1}, force_R_scalar=True)

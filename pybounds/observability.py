@@ -680,7 +680,7 @@ class FisherObservability:
 
 class SlidingFisherObservability:
     def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
-                 states=None, sensors=None, time_steps=None, w=None):
+                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
 
@@ -699,6 +699,7 @@ class SlidingFisherObservability:
         :param None | tuple | list | np.array time_steps: array of time steps to use from O's, ex: np.array([0, 1, 2])
         :param None | tuple | list | np.array w: window size to use from O's,
             if None then just grab it from O as the maximum window size
+        :param bool force_R_scalar: force R to be a scalar in each window (see FisherObservability)
         """
 
         self.O_list = O_list
@@ -727,7 +728,8 @@ class SlidingFisherObservability:
             O = self.O_list[k]
 
             # Compute Fisher information & inverse
-            FO = FisherObservability(O, R=R, lam=lam, states=states, sensors=sensors, time_steps=time_steps, w=w)
+            FO = FisherObservability(O, R=R, lam=lam, force_R_scalar=force_R_scalar,
+                                     states=states, sensors=sensors, time_steps=time_steps, w=w)
             self.FO.append(FO)
 
             # Collect error variance data
