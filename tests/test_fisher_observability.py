@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 import pybounds
 
@@ -136,3 +137,45 @@ class TestFisherParameterEffects:
         """Passing a plain list (no .shape) raises AttributeError before the isinstance check."""
         with pytest.raises((TypeError, AttributeError)):
             pybounds.FisherObservability([[1, 2], [3, 4]], R=0.1, lam=1e-8)
+
+
+def _two_sensor_O():
+    """O with sensors listed out of alphabetical order ('r' before 'a'), 3 time steps."""
+    rng = np.random.default_rng(0)
+    index = pd.MultiIndex.from_tuples([(s, k) for k in range(3) for s in ('r', 'a')],
+                                      names=['sensor', 'time_step'])
+    return pd.DataFrame(rng.normal(size=(6, 2)), index=index, columns=['g', 'd'])
+
+
+def _manual_error_variance(O, r_var, lam=1e-8):
+    R_inv = np.diag([1 / r_var[s] for s in O.index.get_level_values('sensor')])
+    F = O.values.T @ R_inv @ O.values
+    return np.diag(np.linalg.inv(F + lam * np.eye(O.shape[1])))
+
+
+class TestFisherMatrixR:
+    R_VAR = {'r': 0.01, 'a': 100.0}
+
+    def _R_df(self, O):
+        diag = [self.R_VAR[s] for s in O.index.get_level_values('sensor')]
+        return pd.DataFrame(np.diag(diag), index=O.index, columns=O.index)
+
+    def test_dataframe_and_array_R_match_dict(self):
+        O = _two_sensor_O()
+        expected = _manual_error_variance(O, self.R_VAR)
+        R_df = self._R_df(O)
+        for R in (self.R_VAR, R_df, R_df.values):
+            ev = pybounds.FisherObservability(O, R=R).error_variance.values.ravel()
+            np.testing.assert_allclose(ev, expected)
+
+    def test_full_size_R_is_subset_with_O(self):
+        O = _two_sensor_O()
+        expected = _manual_error_variance(O.loc[(slice(None), [0, 1]), :], self.R_VAR)
+        R_df = self._R_df(O)
+        for R in (R_df, R_df.values):
+            ev = pybounds.FisherObservability(O, R=R, time_steps=[0, 1]).error_variance.values.ravel()
+            np.testing.assert_allclose(ev, expected)
+
+    def test_wrong_size_R_array_raises(self):
+        with pytest.raises(ValueError, match='R array must be'):
+            pybounds.FisherObservability(_two_sensor_O(), R=np.eye(4))

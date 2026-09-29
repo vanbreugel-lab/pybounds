@@ -458,7 +458,8 @@ class FisherObservability:
             can also be set as pd.DataFrame where columns set the state names & a multilevel index sets the
             measurement names: O.index names must be ('sensor', 'time_step')
         :param None | np.array | float | dict  R: measurement noise covariance matrix (w*p x w*p)
-            can also be set as pd.DataFrame where R.index = R.columns = O.index
+            as an array, rows/columns follow the row order of the O passed in (it is subset and reordered with O)
+            can also be set as pd.DataFrame where R.index = R.columns = O.index (aligned by label)
             can also be a scaler where R = R * I_(nxn)
             can also be dict where keys must correspond to the 'sensor' index in O data-frame
             if None, then R = I_(nxn)
@@ -514,7 +515,8 @@ class FisherObservability:
         else:
             self.time_steps = np.array(time_steps)
 
-        # Get subset of O
+        # Get subset of O, keeping the full index so a matrix R can be aligned with it
+        self._O_index_full = self.O.index
         self.O = self.O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
 
         # Reset the size of O
@@ -583,14 +585,20 @@ class FisherObservability:
             if R is None:  # set R as identity matrix
                 warnings.warn('R not set, defaulting to identity matrix')
             else:  # set R directly
-                if np.atleast_1d(R).shape[0] == 1:  # given scalar
-                    self.R = R * self.R
-                elif isinstance(R, pd.DataFrame):  # matrix R in data-frame
-                    self.R = R.copy()
-                elif isinstance(R, np.ndarray):  # matrix in array
-                    self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
-                elif isinstance(R, float) or isinstance(R, int):  # set as scalar multiplied by identity matrix
-                    self.R = R * self.R
+                if isinstance(R, pd.DataFrame):  # matrix R in data-frame, aligned with O by index labels
+                    self.R = R.loc[self.O.index, self.O.index].copy()
+                elif isinstance(R, np.ndarray) and R.ndim == 2:  # matrix in array
+                    n_full = len(self._O_index_full)
+                    if R.shape == (n_full, n_full):  # rows/columns in the order of the O passed in
+                        R_full = pd.DataFrame(R, index=self._O_index_full, columns=self._O_index_full)
+                        self.R = R_full.loc[self.O.index, self.O.index].copy()
+                    elif R.shape == (self.pw, self.pw):  # already matches the subset & sorted O
+                        self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
+                    else:
+                        raise ValueError(f'R array must be ({n_full}, {n_full}) to match O, '
+                                         f'or ({self.pw}, {self.pw}) to match the selected subset of O')
+                elif np.size(R) == 1:  # scalar multiplied by identity matrix
+                    self.R = float(np.squeeze(R)) * self.R
                 else:
                     raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
 
