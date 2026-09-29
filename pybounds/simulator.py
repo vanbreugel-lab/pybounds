@@ -207,18 +207,15 @@ class Simulator(object):
         :param t: current time
         """
 
-        mpc_horizon = self.mpc._settings.n_horizon
-
         # Set current step index
         t_s = float(np.asarray(t).squeeze())
         dt_s = float(np.asarray(self.dt).squeeze())
         k_step = int(np.rint(t_s / dt_s))
-        if k_step >= mpc_horizon:  # point is beyond end of input data
-            k_step = mpc_horizon - 1  # set point beyond input data to last point
 
-        # Update current set-point
+        # Update current set-point, holding the last point beyond the end of the set-point data
         for n, state_name in enumerate(self.state_names):
-            self.simulator_tvp_template[state_name + '_set'] = self.setpoint[state_name][k_step]
+            setpoint = self.setpoint[state_name]
+            self.simulator_tvp_template[state_name + '_set'] = setpoint[min(k_step, len(setpoint) - 1)]
 
         return self.simulator_tvp_template
 
@@ -233,15 +230,12 @@ class Simulator(object):
         dt_s = float(np.asarray(self.dt).squeeze())
         k_step = int(np.rint(t_s / dt_s))
 
-        # Update set-point time horizon
+        # Update set-point time horizon, holding the last point beyond the end of the set-point data
         for k in range(mpc_horizon + 1):
-            k_set = k_step + k
-            if k_set >= self.w:  # horizon is beyond end of input data
-                k_set = self.w - 1  # set part of horizon beyond input data to last point
-
-            # Update each set-point over time horizon
             for n, state_name in enumerate(self.state_names):
-                self.mpc_tvp_template['_tvp', k, state_name + '_set'] = self.setpoint[state_name][k_set]
+                setpoint = self.setpoint[state_name]
+                k_set = min(k_step + k, len(setpoint) - 1)
+                self.mpc_tvp_template['_tvp', k, state_name + '_set'] = setpoint[k_set]
 
         return self.mpc_tvp_template
 

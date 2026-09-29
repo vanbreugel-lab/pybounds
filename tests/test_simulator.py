@@ -201,3 +201,23 @@ class TestSingleState:
     def test_wrong_length_x0_raises(self, sim1, x0):
         with pytest.raises(ValueError, match='x0 has'):
             sim1.simulate(x0=x0, u={'u': np.zeros(5)})
+
+
+class TestSetpointHorizon:
+
+    def _sim(self, mpc_horizon):
+        return pybounds.Simulator(lambda X, U: [U[0], 0 * U[0]], lambda X, U: [X[0] / X[1]], dt=0.01,
+                                  state_names=['g', 'd'], input_names=['u'], measurement_names=['r'],
+                                  mpc_horizon=mpc_horizon)
+
+    def test_long_mpc_horizon_does_not_break_plain_simulate(self):
+        """mpc_horizon longer than the (default, length 11) set-point used to raise IndexError."""
+        y = self._sim(mpc_horizon=20).simulate(x0={'g': 2.0, 'd': 3.0}, u={'u': 0.1 * np.ones(50)})
+        assert y.shape == (50, 1)
+
+    def test_simulator_setpoint_follows_data_past_the_horizon(self):
+        sim = self._sim(mpc_horizon=5)
+        setpoint = {k: np.arange(30, dtype=float) for k in ['g', 'd']}
+        sim.update_dict(setpoint, name='setpoint')
+        assert float(sim.simulator_tvp_function(0.2)['g_set']) == 20.0   # k = 20, beyond the horizon of 5
+        assert float(sim.simulator_tvp_function(1.0)['g_set']) == 29.0   # beyond the data: hold the last point
