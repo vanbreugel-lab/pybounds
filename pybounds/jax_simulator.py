@@ -337,8 +337,8 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         State trajectory.
     u_sim : array-like or dict, shape (T, m)
         Input trajectory.
-    w : int
-        Window size in time steps.
+    w : int, optional
+        Window size in time steps.  If None, use the full trajectory (one window).
     aux_list : list, optional
         Auxiliary data, one entry per time step of the trajectory (length T),
         as in ``SlidingEmpiricalObservabilityMatrix``.  Window i passes
@@ -354,10 +354,9 @@ class JaxSlidingEmpiricalObservabilityMatrix:
     """
 
     @_with_x64
-    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w, aux_list=None,
+    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w=None, aux_list=None,
                  z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator
-        self.w = w
         self.n = jax_simulator.n
         self.p = jax_simulator.p
         self.state_names = jax_simulator.state_names
@@ -388,8 +387,13 @@ class JaxSlidingEmpiricalObservabilityMatrix:
             raise ValueError('t_sim & x_sim must have same number of rows')
         if N != u_arr.shape[0]:
             raise ValueError('t_sim & u_sim must have same number of rows')
+        if w is None:  # set window size to full time-series size, as in SlidingEmpiricalObservabilityMatrix
+            w = N
+        if w < 1:
+            raise ValueError(f'window size ({w}) must be at least 1')
         if w > N:
-            raise ValueError('window size must be smaller than trajectory length')
+            raise ValueError(f'window size ({w}) must be smaller than trajectory length ({N})')
+        self.w = w
 
         self.O_index = np.arange(0, N - w + 1, step=1)
         self.O_time = self.t_sim[self.O_index]

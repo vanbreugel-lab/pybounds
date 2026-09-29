@@ -372,6 +372,8 @@ class SlidingEmpiricalObservabilityMatrix:
         else:
             self.w = w
 
+        if self.w < 1:
+            raise ValueError(f'window size ({self.w}) must be at least 1')
         if self.w > self.N:
             raise ValueError(f'window size ({self.w}) must be smaller than trajectory length ({self.N})')
 

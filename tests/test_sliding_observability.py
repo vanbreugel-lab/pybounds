@@ -184,3 +184,12 @@ class TestSpawnPicklabilityCheck:
     def test_module_level_factory_passes_check(self, interactive_main):
         from pybounds.observability import _check_spawn_picklable
         _check_spawn_picklable(_module_level_factory, 'simulator_factory')  # no error
+
+
+class TestSEOMWindowSize:
+
+    @pytest.mark.parametrize('w', [0, -1])
+    def test_nonpositive_w_raises(self, simulator, simulation_output, w):
+        t_sim, x_sim, u_sim, _ = simulation_output
+        with pytest.raises(ValueError, match='must be at least 1'):
+            pybounds.SlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w)

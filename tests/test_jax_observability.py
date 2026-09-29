@@ -477,3 +477,16 @@ class TestJaxIntegratorChoice:
         y_euler = _decay_sim(0.01, integrator='euler').simulate([1.0], u)
         np.testing.assert_allclose(y_euler[:, 0], (1 - 0.2) ** np.arange(3))
         assert not np.allclose(y_rk4, y_euler)
+
+
+class TestJaxSlidingWindowSize:
+    def test_w_none_uses_full_trajectory(self, jax_sim, seom):
+        s = JaxSlidingEmpiricalObservabilityMatrix(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim)
+        assert s.w == N_STEPS_SLIDING
+        assert len(s.O_sliding) == 1
+        assert s.O_sliding[0].shape == (N_STEPS_SLIDING, 2)
+
+    @pytest.mark.parametrize('w', [0, -1])
+    def test_nonpositive_w_raises(self, jax_sim, seom, w):
+        with pytest.raises(ValueError, match='must be at least 1'):
+            JaxSlidingEmpiricalObservabilityMatrix(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, w=w)
