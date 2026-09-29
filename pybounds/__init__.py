@@ -31,7 +31,11 @@ __all__ = [
     'SymbolicJacobian',
     'colorline',
     'plot_heatmap_log_timeseries',
-    'JaxSimulator',
-    'JaxEmpiricalObservabilityMatrix',
-    'JaxSlidingEmpiricalObservabilityMatrix',
 ]
+
+if _JAX_AVAILABLE:
+    __all__ += [
+        'JaxSimulator',
+        'JaxEmpiricalObservabilityMatrix',
+        'JaxSlidingEmpiricalObservabilityMatrix',
+    ]
