@@ -140,7 +140,7 @@ class EmpiricalObservabilityMatrix(_TransformJacobianAliases):
         if isinstance(x0, dict):
             self.x0 = np.array(_ordered_values(x0, getattr(simulator, 'state_names', None), 'x0'))
         else:
-            self.x0 = np.array(x0).squeeze()
+            self.x0 = np.ravel(np.array(x0))  # 1-D, also for a single state
 
         if isinstance(u, dict):
             self.u = np.vstack(_ordered_values(u, getattr(simulator, 'input_names', None), 'u')).T
@@ -341,7 +341,8 @@ class SlidingEmpiricalObservabilityMatrix:
         if isinstance(x_sim, dict):
             self.x_sim = np.vstack(_ordered_values(x_sim, getattr(simulator, 'state_names', None), 'x_sim')).T
         else:
-            self.x_sim = np.array(x_sim).squeeze()
+            x_sim = np.array(x_sim)
+            self.x_sim = x_sim.reshape(x_sim.shape[0], -1)  # (N, n), also for a single state
 
         if isinstance(u_sim, dict):
             self.u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T

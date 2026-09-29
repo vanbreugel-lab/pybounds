@@ -171,3 +171,33 @@ class TestSimulateOutputValues:
         u = {'u': np.ones(10)}
         with pytest.raises(Exception, match='u must be None if running MPC'):
             simulator.simulate(x0={'g': 1.0, 'd': 1.0}, u=u, mpc=True)
+
+
+@pytest.fixture(scope='module')
+def sim1():
+    """Single-state system: dx/dt = -x + u, y = x."""
+    return pybounds.Simulator(lambda X, U: [-X[0] + U[0]], lambda X, U: [X[0]], dt=0.01,
+                              state_names=['x'], input_names=['u'], measurement_names=['y'])
+
+
+class TestSingleState:
+
+    @pytest.mark.parametrize('x0', [[1.0], (1.0,), np.array([1.0]), {'x': 1.0}])
+    def test_simulate(self, sim1, x0):
+        y = sim1.simulate(x0=x0, u={'u': np.zeros(20)})
+        np.testing.assert_allclose(y[:, 0], np.exp(-0.01 * np.arange(20)), rtol=1e-6)
+
+    def test_observability_matrices(self, sim1):
+        t = 0.01 * np.arange(20)
+        for x0 in ([1.0], {'x': 1.0}):
+            eom = pybounds.EmpiricalObservabilityMatrix(sim1, x0, {'u': np.zeros(20)}, eps=1e-4)
+            np.testing.assert_allclose(eom.O[:, 0], np.exp(-t), rtol=1e-5)
+        seom = pybounds.SlidingEmpiricalObservabilityMatrix(sim1, t, {'x': np.exp(-t)}, {'u': np.zeros(20)},
+                                                             w=5, eps=1e-4)
+        assert len(seom.O_sliding) == 16
+        np.testing.assert_allclose(seom.O_sliding[0][:, 0], np.exp(-t[:5]), rtol=1e-5)
+
+    @pytest.mark.parametrize('x0', [[1.0, 2.0], []])
+    def test_wrong_length_x0_raises(self, sim1, x0):
+        with pytest.raises(ValueError, match='x0 has'):
+            sim1.simulate(x0=x0, u={'u': np.zeros(5)})
