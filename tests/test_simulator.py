@@ -221,3 +221,12 @@ class TestSetpointHorizon:
         sim.update_dict(setpoint, name='setpoint')
         assert float(sim.simulator_tvp_function(0.2)['g_set']) == 20.0   # k = 20, beyond the horizon of 5
         assert float(sim.simulator_tvp_function(1.0)['g_set']) == 29.0   # beyond the data: hold the last point
+
+
+class TestListInputs:
+
+    @pytest.mark.parametrize('u', [{'u': [0.1] * 10}, [[0.1] * 10], ([0.1] * 10,)])
+    def test_plain_python_lists(self, simulator, u):
+        y_list = simulator.simulate(x0={'g': 2.0, 'd': 3.0}, u=u)
+        y_array = simulator.simulate(x0={'g': 2.0, 'd': 3.0}, u={'u': 0.1 * np.ones(10)})
+        np.testing.assert_allclose(y_list, y_array)

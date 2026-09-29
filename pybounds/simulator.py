@@ -263,19 +263,20 @@ class Simulator(object):
 
         if data is not None:  # data given
             if isinstance(data, dict):  # in dict format
+                data = {k: np.ravel(np.asarray(v, dtype=float)) for k, v in data.items()}  # lists/scalars -> 1-D arrays
                 SetDict().set_dict_with_overwrite(update, data)  # update only the inputs in the dict given
 
                 # Normalize unset keys to be the length of the set keys be repeating the 1st element
                 unset_key = set(update.keys()) - set(data.keys())  # find keys that were not set
                 set_key = set(data.keys())  # find keys that were set
                 if unset_key != set_key:
-                    w = data[list(set_key)[0]].squeeze().shape[0]  # size of 1st set key
+                    w = data[list(set_key)[0]].shape[0]  # size of 1st set key
                     for k in unset_key:  # update each unset key
                         update[k] = update[k][0] * np.ones(w)
 
             elif isinstance(data, list) or isinstance(data, tuple):  # list or tuple format, each input vector in each element
                 for n, k in enumerate(update.keys()):  # each state
-                    update[k] = data[n]
+                    update[k] = np.ravel(np.asarray(data[n], dtype=float))
             elif isinstance(data, np.ndarray):  # numpy array format given as matrix where columns are the different inputs
                 if len(data.shape) <= 1:  # given as 1d array, so convert to column vector
                     data = np.atleast_2d(data).T
