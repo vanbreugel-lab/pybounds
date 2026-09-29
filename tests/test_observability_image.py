@@ -114,3 +114,30 @@ class TestObservabilityMatrixImageNameTypes:
         OI.plot()
         OI.fig.canvas.draw()
         plt.close(OI.fig)
+
+
+def _two_sensor_image_O(sensor_major):
+    import pandas as pd
+    if sensor_major:
+        rows = [(s, k) for s in ('r', 'a') for k in range(3)]
+    else:
+        rows = [(s, k) for k in range(3) for s in ('r', 'a')]
+    index = pd.MultiIndex.from_tuples(rows, names=['sensor', 'time_step'])
+    return pd.DataFrame(np.arange(12.0).reshape(6, 2), index=index, columns=['g', 'd'])
+
+
+class TestObservabilityMatrixImageRowLabels:
+
+    @pytest.mark.parametrize('sensor_major', [False, True])
+    def test_each_row_labeled_from_its_index(self, sensor_major):
+        O = _two_sensor_image_O(sensor_major)
+        OI = pybounds.ObservabilityMatrixImage(O)
+        assert OI.sensor_names_default == ['r', 'a']
+        assert OI.measurement_names == ['${%s}_{,k=%d}$' % (s, k) for s, k in O.index]
+
+    def test_time_major_labels_unchanged(self):
+        O = _two_sensor_image_O(sensor_major=False)
+        assert pybounds.ObservabilityMatrixImage(O, sensor_names=['sa', 'sb']).measurement_names == \
+            ['$sa,_{k=0}$', '$sb,_{k=0}$', '$sa,_{k=1}$', '$sb,_{k=1}$', '$sa,_{k=2}$', '$sb,_{k=2}$']
+        assert pybounds.ObservabilityMatrixImage(O, sensor_names=['s']).measurement_names == \
+            ['${s}_{0,k=0}$', '${s}_{1,k=0}$', '${s}_{0,k=1}$', '${s}_{1,k=1}$', '${s}_{0,k=2}$', '${s}_{1,k=2}$']
