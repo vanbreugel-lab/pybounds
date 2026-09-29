@@ -14,6 +14,11 @@ Requirements
   operations so that JAX can trace through them.  Plain Python arithmetic
   operators (``+``, ``-``, ``*``, ``/``) work with both backends as-is.
 
+Precision
+---------
+Computations run in float64 to match do_mpc, but only inside pybounds calls:
+importing pybounds does not change JAX's global ``jax_enable_x64`` setting.
+
 Pipeline hand-off
 -----------------
 do_mpc ``Simulator`` remains the entry point for MPC trajectory reconstruction
@@ -29,6 +34,7 @@ u_sim)`` are known, ``JaxSimulator`` takes over for the observability analysis:
                       FisherObservability / SlidingFisherObservability  (unchanged)
 """
 
+import functools
 import warnings
 import numpy as np
 import pandas as pd
@@ -39,7 +45,23 @@ import jax.numpy as jnp
 from .jacobian import SymbolicJacobian
 from .observability import transform_states, _TransformJacobianAliases
 
-jax.config.update("jax_enable_x64", True)   # use float64 to match do_mpc precision
+
+
+def _x64():
+    """Context manager that enables float64 (to match do_mpc precision) without changing JAX's global setting."""
+    if hasattr(jax, 'enable_x64'):  # newer JAX: config state usable as a context manager
+        return jax.enable_x64(True)
+    from jax.experimental import enable_x64  # older JAX
+    return enable_x64()
+
+
+def _with_x64(method):
+    """Run a method with float64 enabled only for its own JAX computations."""
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        with _x64():
+            return method(*args, **kwargs)
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +183,7 @@ class JaxSimulator:
 
         return simulate
 
+    @_with_x64
     def simulate(self, x0, u_seq, aux=None):
         """Run the open-loop simulation.
 
@@ -225,6 +248,7 @@ class JaxEmpiricalObservabilityMatrix(_TransformJacobianAliases):
         Names of the states in the new coordinates.
     """
 
+    @_with_x64
     def __init__(self, jax_simulator, x0, u_seq, eps=None, aux=None,
                  z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator
@@ -327,6 +351,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         Names of the states in the new coordinates.
     """
 
+    @_with_x64
     def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w, aux_list=None,
                  z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator

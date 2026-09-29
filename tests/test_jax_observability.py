@@ -438,3 +438,28 @@ class TestJaxNonFiniteWarning:
         JaxSlidingEmpiricalObservabilityMatrix(
             jax_sim_log, np.arange(12) * DT, np.ones((12, 1)), np.zeros((12, 1)), w=3)
         assert not _runtime_warnings(recwarn)
+
+
+# ---------------------------------------------------------------------------
+# float64 is scoped to pybounds calls
+# ---------------------------------------------------------------------------
+
+class TestJaxPrecisionScope:
+    def test_import_does_not_enable_x64_globally(self):
+        import subprocess
+        import sys
+        code = ('import jax.numpy as jnp, pybounds; '
+                'assert pybounds._JAX_AVAILABLE; '
+                'print(jnp.ones(1).dtype)')
+        out = subprocess.run([sys.executable, '-W', 'ignore', '-c', code],
+                             capture_output=True, text=True, check=True)
+        assert out.stdout.strip() == 'float32'
+
+    def test_results_are_float64_and_global_default_unchanged(self, jax_sim, seom):
+        y = jax_sim.simulate([2.0, 3.0], 0.1 * np.ones((5, 1)))
+        eom = JaxEmpiricalObservabilityMatrix(jax_sim, [2.0, 3.0], 0.1 * np.ones((5, 1)))
+        s = JaxSlidingEmpiricalObservabilityMatrix(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE)
+        assert y.dtype == np.float64
+        assert eom.O.dtype == np.float64
+        assert s.O_sliding[0].dtype == np.float64
+        assert jnp.ones(1).dtype == jnp.float32
