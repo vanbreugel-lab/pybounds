@@ -17,8 +17,8 @@ class Simulator(object):
 
         """ Simulator.
 
-        :param callable f: dynamics function f(X, U, t)
-        :param callable h: measurement function h(X, U, t)
+        :param callable f: dynamics function f(X, U) returning the list of state derivatives
+        :param callable h: measurement function h(X, U) returning the list of measurements
         :param float dt: sampling time in seconds
         :param int n: number of states, optional but cannot be set if state_names is set
         :param int m: number of inputs, optional but cannot be set if input_names is set
