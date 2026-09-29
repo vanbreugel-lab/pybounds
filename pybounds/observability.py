@@ -449,7 +449,12 @@ class FisherObservability:
             can also be a scaler where R = R * I_(nxn)
             can also be dict where keys must correspond to the 'sensor' index in O data-frame
             if None, then R = I_(nxn)
-        :param float lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
+        :param float | str lam: regularization for inverting F, computed as (F + lam*I)^-1 (Chernoff inverse).
+            1/lam is the ceiling on the minimum error variance: no state's error variance can exceed 1/lam,
+            so a value near 1/lam means the state is unobservable (or nearly so), not that it has that variance.
+            lam is absolute, so it should be small relative to the eigenvalues of F, which scale with 1/R
+            and with the units of each state. Default 1e-8 (ceiling of 1e8).
+            If lam='limit', compute the limit lam -> 0 symbolically.
         :param bool force_R_scalar: force R to be a scalar, useful when the resulting R matrix is too big to fit in memory
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -602,7 +607,9 @@ class SlidingFisherObservability:
             can also be a scaler where R = R * I_(nxn)
             can also be dict where keys must correspond to the 'sensor' index in O data-frame
             if None, then R = I_(nxn)
-        :param float | np.array lam: lamda parameter, if lam='limit' compute F^-1 symbolically, otherwise use Chernoff inverse
+        :param float | str lam: regularization for inverting F in each window, computed as (F + lam*I)^-1.
+            1/lam is the ceiling on the minimum error variance (see FisherObservability). Default 1e-8.
+            If lam='limit', compute the limit lam -> 0 symbolically.
         :param None | np.array time: time vector the same size as O_list
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -884,7 +891,9 @@ def compute_observability(simulator, t_sim, x_sim, u_sim, R,
     R : dict  — sensor noise covariance, e.g. {'r': 0.1}
     w : int   — sliding window length (time steps)
     eps : float — finite-difference perturbation size (ignored when use_jax=True)
-    lam : float — Chernoff regularization for Fisher inversion
+    lam : float — Chernoff regularization for Fisher inversion, (F + lam*I)^-1.
+        1/lam is the ceiling on the minimum error variance, so values near 1/lam
+        (1e8 for the default) indicate unobservable states.
     use_jax : bool — if True, use JAX autodiff (exact Jacobians, faster for many windows).
         Requires JAX to be installed and ``simulator`` to be a ``JaxSimulator`` whose
         ``f`` and ``h`` functions are written with ``jax.numpy`` (``jnp``) instead of

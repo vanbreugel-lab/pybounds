@@ -124,6 +124,14 @@ class TestFisherParameterEffects:
         FO = pybounds.FisherObservability(O, R=1.0)
         assert np.all(np.isfinite(FO.error_variance.values))
 
+    @pytest.mark.parametrize('lam', [1e-8, 1e-2, 1.0])
+    def test_error_variance_ceiling_is_one_over_lam(self, lam):
+        """1/lam bounds every error variance, and an unobservable state sits at the ceiling."""
+        O = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])  # x_1 is unobservable
+        ev = pybounds.FisherObservability(O, R=1.0, lam=lam).error_variance
+        assert np.all(ev.values <= 1 / lam)
+        assert np.isclose(ev['x_1'].item(), 1 / lam)
+
     def test_invalid_O_type_raises(self, eom):
         """Passing a plain list (no .shape) raises AttributeError before the isinstance check."""
         with pytest.raises((TypeError, AttributeError)):

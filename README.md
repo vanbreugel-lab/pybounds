@@ -67,6 +67,8 @@ ev.set_index('time')[['g', 'd']].plot(logy=True, ylabel='Min. error variance')
 plt.show()
 ```
 
+The Fisher information matrix F is inverted as (F + λI)⁻¹, with λ set by the `lam` argument (default `1e-8`). 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
+
 ## Notebook examples
 
 ### Basic Examples
