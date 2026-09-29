@@ -391,3 +391,50 @@ class TestJaxSubsteps:
     def test_invalid_substeps_raises(self, substeps):
         with pytest.raises(ValueError, match='substeps must be a positive integer'):
             _decay_sim(0.1, substeps=substeps)
+
+
+# ---------------------------------------------------------------------------
+# Non-finite output warning
+# ---------------------------------------------------------------------------
+
+def f_const(x, u):
+    return jnp.array([0.0 * x[0] + 0.0 * u[0]])
+
+
+def h_log(x, u):
+    """NaN whenever the state is negative."""
+    return jnp.array([jnp.log(x[0])])
+
+
+@pytest.fixture(scope='module')
+def jax_sim_log():
+    return JaxSimulator(f_const, h_log, dt=DT, state_names=['x'], input_names=['u'],
+                        measurement_names=['y'])
+
+
+def _runtime_warnings(recwarn):
+    return [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+
+
+class TestJaxNonFiniteWarning:
+    def test_simulate_warns(self, jax_sim_log):
+        with pytest.warns(RuntimeWarning, match='JaxSimulator.simulate output contains NaN or inf'):
+            jax_sim_log.simulate([-1.0], np.zeros((10, 1)))
+
+    def test_eom_warns(self, jax_sim_log):
+        with pytest.warns(RuntimeWarning, match='JaxEmpiricalObservabilityMatrix contains NaN or inf'):
+            JaxEmpiricalObservabilityMatrix(jax_sim_log, [-1.0], np.zeros((10, 1)))
+
+    def test_sliding_warns_with_bad_window_count(self, jax_sim_log):
+        n, w = 12, 3
+        x_sim = np.r_[np.ones(8), -np.ones(4)][:, None]   # windows starting at index 8, 9 are negative
+        with pytest.warns(RuntimeWarning, match=r'\(2 of 10 windows\) contains NaN or inf'):
+            JaxSlidingEmpiricalObservabilityMatrix(
+                jax_sim_log, np.arange(n) * DT, x_sim, np.zeros((n, 1)), w=w)
+
+    def test_no_warning_for_finite_output(self, jax_sim_log, recwarn):
+        jax_sim_log.simulate([1.0], np.zeros((10, 1)))
+        JaxEmpiricalObservabilityMatrix(jax_sim_log, [1.0], np.zeros((10, 1)))
+        JaxSlidingEmpiricalObservabilityMatrix(
+            jax_sim_log, np.arange(12) * DT, np.ones((12, 1)), np.zeros((12, 1)), w=3)
+        assert not _runtime_warnings(recwarn)

@@ -29,6 +29,7 @@ u_sim)`` are known, ``JaxSimulator`` takes over for the observability analysis:
                       FisherObservability / SlidingFisherObservability  (unchanged)
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 import sympy as sp
@@ -182,8 +183,10 @@ class JaxSimulator:
         """
         x0_arr = _to_array(x0, self.state_names)
         u_arr = _to_u_array(u_seq, self.input_names)
-        y = self._simulate_jax(x0_arr, u_arr, _to_aux(aux))
-        return np.array(y)
+        y = np.array(self._simulate_jax(x0_arr, u_arr, _to_aux(aux)))
+        if not np.isfinite(y).all():
+            _warn_nonfinite('JaxSimulator.simulate output')
+        return y
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +254,8 @@ class JaxEmpiricalObservabilityMatrix:
         # Row order: [sensor_0 t=0, sensor_1 t=0, ..., sensor_p t=0,
         #             sensor_0 t=1, ...]
         self.O = jac.reshape(self.w * self.p, self.n)
+        if not (np.isfinite(self.y_nominal).all() and np.isfinite(self.O).all()):
+            _warn_nonfinite('JaxEmpiricalObservabilityMatrix')
 
         # Build MultiIndex DataFrame matching EmpiricalObservabilityMatrix.O_df
         measurement_labels = self.measurement_names * self.w
@@ -396,6 +401,10 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         vmapped_sim = jax.jit(jax.vmap(sim, in_axes=(0, 0, aux_axis)))
         y_batch = np.array(vmapped_sim(x0_batch, u_batch, aux_batch))    # (n_windows, w, p)
 
+        bad = ~(np.isfinite(jac_batch).all(axis=(1, 2, 3)) & np.isfinite(y_batch).all(axis=(1, 2)))
+        if bad.any():
+            _warn_nonfinite(f'JaxSlidingEmpiricalObservabilityMatrix ({bad.sum()} of {n_windows} windows)')
+
         # Build O_df_sliding list (same format as SlidingEmpiricalObservabilityMatrix)
         measurement_labels = self.measurement_names * w
         time_labels = np.repeat(np.arange(w), self.p).astype(int)
@@ -459,6 +468,15 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names):
         O_df_z.append(O_z)
 
     return O_df_z
+
+
+def _warn_nonfinite(context):
+    """Warn about NaN or inf values, which usually mean the integration diverged."""
+    warnings.warn(
+        f'{context} contains NaN or inf values; the integration may have diverged or f/h '
+        'produced invalid values. For coarse dt or stiff dynamics, increase JaxSimulator(substeps=...), '
+        'reduce dt, or use the CasADi backend (IDAS).',
+        RuntimeWarning, stacklevel=3)
 
 
 def _to_aux(aux):
