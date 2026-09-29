@@ -103,3 +103,14 @@ class TestObservabilityMatrixImageClipping:
         plt.close(OI.fig)
         np.testing.assert_array_equal(OI.O.values, before)
         np.testing.assert_array_equal(O.values, before)
+
+
+class TestObservabilityMatrixImageNameTypes:
+
+    def test_tuple_state_and_sensor_names(self, seom):
+        """EmpiricalObservabilityMatrix stores state_names as a tuple when z_function is used."""
+        OI = pybounds.ObservabilityMatrixImage(seom.O_df_sliding[0], state_names=('a', 'b'), sensor_names=('s',))
+        assert len(OI.state_names) == 2
+        OI.plot()
+        OI.fig.canvas.draw()
+        plt.close(OI.fig)

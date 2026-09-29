@@ -832,7 +832,7 @@ class ObservabilityMatrixImage:
         # Set state names
         if state_names is not None:
             if len(state_names) == self.n:
-                self.state_names = state_names.copy()
+                self.state_names = list(state_names)
             elif len(state_names) == 1:
                 self.state_names = ['${' + state_names[0] + '}_{' + str(n) + '}$' for n in range(1, self.n + 1)]
             else:
@@ -847,7 +847,7 @@ class ObservabilityMatrixImage:
         # Set sensor & measurement names
         if sensor_names is not None:
             if len(sensor_names) == self.n_sensor:
-                self.sensor_names = sensor_names.copy()
+                self.sensor_names = list(sensor_names)
                 self.sensor_names = LatexConverter.convert_to_latex(self.sensor_names, remove_dollar_signs=True)
                 self.measurement_names = []
                 for w in range(self.n_time_step):
