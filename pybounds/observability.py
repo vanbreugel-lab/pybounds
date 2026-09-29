@@ -11,6 +11,9 @@ from .simulator import Simulator
 from .util import LatexStates
 from .jacobian import SymbolicJacobian
 
+# Default regularization for the Fisher information inverse (F + lam*I)^-1
+DEFAULT_LAM = 1e-8
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers for process-based parallel sliding window computation.
@@ -433,7 +436,7 @@ class SlidingEmpiricalObservabilityMatrix:
 
 
 class FisherObservability:
-    def __init__(self, O, R=None, lam=None, force_R_scalar=False,
+    def __init__(self, O, R=None, lam=DEFAULT_LAM, force_R_scalar=False,
                  states=None, sensors=None, time_steps=None, w=None):
         """ Evaluate the observability of a state variable(s) using the Fisher Information Matrix.
 
@@ -523,8 +526,7 @@ class FisherObservability:
 
         # Set sigma
         if lam is None:
-            # np.linalg.eig(self.F)
-            self.lam = 0.0
+            self.lam = DEFAULT_LAM
         else:
             self.lam = lam
 
@@ -589,7 +591,7 @@ class FisherObservability:
 
 
 class SlidingFisherObservability:
-    def __init__(self, O_list, R=None, lam=1e-8, time=None,
+    def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
                  states=None, sensors=None, time_steps=None, w=None):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
@@ -870,7 +872,7 @@ class ObservabilityMatrixImage:
 
 
 def compute_observability(simulator, t_sim, x_sim, u_sim, R,
-                          w=6, eps=1e-4, lam=1e-8, use_jax=False):
+                          w=6, eps=1e-4, lam=DEFAULT_LAM, use_jax=False):
     """Compute sliding-window Fisher observability in one call.
 
     Parameters

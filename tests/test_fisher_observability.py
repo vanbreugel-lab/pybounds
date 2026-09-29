@@ -111,6 +111,19 @@ class TestFisherParameterEffects:
         assert FO.O.shape == (3, 2)
         assert np.allclose(FO.O.values, eom.O_df.values[0:3])
 
+    @pytest.mark.parametrize('lam_kwargs', [{}, {'lam': None}])
+    def test_default_lam_matches_explicit_1e_8(self, eom, lam_kwargs):
+        FO_default = pybounds.FisherObservability(eom.O_df, R={'r': 0.1}, **lam_kwargs)
+        FO_explicit = pybounds.FisherObservability(eom.O_df, R={'r': 0.1}, lam=1e-8)
+        assert FO_default.lam == 1e-8
+        assert np.allclose(FO_default.error_variance.values, FO_explicit.error_variance.values)
+
+    def test_default_lam_handles_singular_F(self):
+        """An exactly unobservable state (zero column in O) should not make the default inverse fail."""
+        O = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])
+        FO = pybounds.FisherObservability(O, R=1.0)
+        assert np.all(np.isfinite(FO.error_variance.values))
+
     def test_invalid_O_type_raises(self, eom):
         """Passing a plain list (no .shape) raises AttributeError before the isinstance check."""
         with pytest.raises((TypeError, AttributeError)):
