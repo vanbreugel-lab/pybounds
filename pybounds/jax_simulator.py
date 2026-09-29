@@ -31,8 +31,12 @@ u_sim)`` are known, ``JaxSimulator`` takes over for the observability analysis:
 
 import numpy as np
 import pandas as pd
+import sympy as sp
 import jax
 import jax.numpy as jnp
+
+from .jacobian import SymbolicJacobian
+from .observability import transform_states
 
 jax.config.update("jax_enable_x64", True)   # use float64 to match do_mpc precision
 
@@ -175,9 +179,16 @@ class JaxEmpiricalObservabilityMatrix:
         Input sequence, shape ``(w, m)`` or dict.
     eps : float, optional
         Accepted for API compatibility but not used (the Jacobian is exact).
+    z_function : callable, optional
+        Transforms coordinates from original to new states, ``z = z_function(x)``,
+        using sympy functions.  Same as ``EmpiricalObservabilityMatrix``;
+        leave as None to keep the original coordinates.
+    z_state_names : list of str, optional
+        Names of the states in the new coordinates.
     """
 
-    def __init__(self, jax_simulator, x0, u_seq, eps=None):
+    def __init__(self, jax_simulator, x0, u_seq, eps=None,
+                 z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator
         self.eps = eps  # kept for API compat; not used
 
@@ -217,6 +228,19 @@ class JaxEmpiricalObservabilityMatrix:
         self.O_df = self.O_df.set_index('time_step', append=True)
         self.O_df.index.names = ['sensor', 'time_step']
 
+        # Perform coordinate transformation on O, if specified
+        if z_function is not None:
+            self.O_df, self.dzdx, self.dxdz_sym = transform_states(O=self.O_df,
+                                                                   square_flag=False,
+                                                                   z_function=z_function,
+                                                                   x0=np.array(x0_arr),
+                                                                   z_state_names=z_state_names)
+            self.state_names = list(self.O_df.columns)
+            self.O = self.O_df.values
+        else:
+            self.dzdx = None
+            self.dxdz_sym = None
+
 
 # ---------------------------------------------------------------------------
 # JaxSlidingEmpiricalObservabilityMatrix
@@ -247,9 +271,16 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         Input trajectory.
     w : int
         Window size in time steps.
+    z_function : callable, optional
+        Transforms coordinates from original to new states, ``z = z_function(x)``,
+        using sympy functions.  Each window's O is transformed at that window's
+        initial state, as in ``SlidingEmpiricalObservabilityMatrix``.
+    z_state_names : list of str, optional
+        Names of the states in the new coordinates.
     """
 
-    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w):
+    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w,
+                 z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator
         self.w = w
         self.n = jax_simulator.n
@@ -335,6 +366,13 @@ class JaxSlidingEmpiricalObservabilityMatrix:
             O_df_i.index.names = ['sensor', 'time_step']
             self.O_df_sliding.append(O_df_i)
 
+        # Perform coordinate transformation on each window's O, if specified
+        if z_function is not None:
+            self.O_df_sliding = _transform_O_df_list(self.O_df_sliding, np.array(x0_batch),
+                                                     z_function, z_state_names)
+            self.O_sliding = [O_df_i.values for O_df_i in self.O_df_sliding]
+            self.state_names = list(self.O_df_sliding[0].columns)
+
     def get_observability_matrix(self):
         """Return a copy of the sliding O_df list."""
         return self.O_df_sliding.copy()
@@ -343,6 +381,26 @@ class JaxSlidingEmpiricalObservabilityMatrix:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names):
+    """Apply ``transform_states`` to each O data-frame at its own x0.
+
+    Gives the same result as calling ``transform_states`` per window, but
+    builds (and simplifies) the symbolic Jacobian only once.
+    """
+    x_sym = sp.symbols('x_0:%d' % O_df_list[0].shape[1])
+    dxdz_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+
+    O_df_z = []
+    for O_df, x0 in zip(O_df_list, x0_list):
+        dzdx = np.linalg.inv(dxdz_function(np.array(x0)))
+        O_z = O_df @ dzdx
+        if z_state_names is not None:
+            O_z.columns = z_state_names
+        O_df_z.append(O_z)
+
+    return O_df_z
+
 
 def _to_array(x, names):
     """Convert x0 (dict or array-like) to a 1-D float64 jnp array."""

@@ -14,6 +14,7 @@ tolerances.
 
 import numpy as np
 import pytest
+import sympy as sp
 
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp
@@ -37,6 +38,14 @@ def f_jax(x, u):
 
 def h_jax(x, u):
     return jnp.array([x[0] / x[1]])
+
+
+def z_optic_flow(x):
+    """Transform [g, d] -> [g/d, d]."""
+    return sp.Matrix([x[0] / x[1], x[1]])
+
+
+Z_STATE_NAMES = ['r', 'd']
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +205,50 @@ class TestJaxSlidingEmpiricalObservabilityMatrix:
         for a, b in zip(jax_seom.window_data['y'], seom.window_data['y']):
             assert a.shape == (WINDOW_SIZE, 1)
             np.testing.assert_allclose(a, b, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Coordinate transformation (z_function)
+# ---------------------------------------------------------------------------
+
+class TestJaxZFunction:
+    def test_eom_matches_legacy(self, jax_sim, simulator):
+        x0 = {'g': 2.0, 'd': 3.0}
+        u = {'u': 0.1 * np.ones(N_STEPS)}
+        jax_eom_z = JaxEmpiricalObservabilityMatrix(jax_sim, x0, u, z_function=z_optic_flow,
+                                                    z_state_names=Z_STATE_NAMES)
+        eom_z = pybounds.EmpiricalObservabilityMatrix(simulator, x0, u, eps=EPS, z_function=z_optic_flow,
+                                                      z_state_names=Z_STATE_NAMES)
+        assert list(jax_eom_z.O_df.columns) == Z_STATE_NAMES
+        assert jax_eom_z.state_names == Z_STATE_NAMES
+        assert jax_eom_z.dzdx is not None
+        np.testing.assert_array_equal(jax_eom_z.O, jax_eom_z.O_df.values)
+        np.testing.assert_allclose(jax_eom_z.O, eom_z.O, atol=1e-3)
+
+    def test_eom_without_z_has_no_jacobian(self, jax_eom):
+        assert jax_eom.dzdx is None
+        assert jax_eom.dxdz_sym is None
+
+    @pytest.mark.parametrize('z_state_names', [Z_STATE_NAMES, None])
+    def test_sliding_matches_transform_states_per_window(self, jax_sim, jax_seom, seom, z_state_names):
+        jax_seom_z = JaxSlidingEmpiricalObservabilityMatrix(
+            jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE,
+            z_function=z_optic_flow, z_state_names=z_state_names)
+        assert len(jax_seom_z.O_df_sliding) == N_WINDOWS
+        for i in (0, N_WINDOWS - 1):
+            expected, _, _ = pybounds.transform_states(
+                O=jax_seom.O_df_sliding[i], z_function=z_optic_flow,
+                x0=seom.x_sim[jax_seom.O_index[i]], z_state_names=z_state_names)
+            assert list(jax_seom_z.O_df_sliding[i].columns) == list(expected.columns)
+            np.testing.assert_allclose(jax_seom_z.O_df_sliding[i].values, expected.values)
+            np.testing.assert_array_equal(jax_seom_z.O_sliding[i], jax_seom_z.O_df_sliding[i].values)
+
+    def test_sliding_matches_legacy(self, jax_sim, simulator, seom):
+        kwargs = dict(w=WINDOW_SIZE, z_function=z_optic_flow, z_state_names=Z_STATE_NAMES)
+        jax_seom_z = JaxSlidingEmpiricalObservabilityMatrix(
+            jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, **kwargs)
+        seom_z = pybounds.SlidingEmpiricalObservabilityMatrix(
+            simulator, seom.t_sim, seom.x_sim, seom.u_sim, eps=EPS, **kwargs)
+        assert jax_seom_z.state_names == Z_STATE_NAMES
+        for O_jax, O_leg in zip(jax_seom_z.O_sliding, seom_z.O_sliding):
+            np.testing.assert_allclose(O_jax, O_leg, atol=1e-3)
