@@ -674,8 +674,10 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
-        self.shift_index = int(np.round((1 / 2) * float(FO.w)))
-        self.shift_time = self.shift_index * self.dt  # shift the time forward by half the window size
+        # Shift the time forward by half the window size. Floor division puts odd windows at their center
+        # time-step (w-1)/2; np.round's banker's rounding gave 2, 2, 4, 4 for w = 3, 5, 7, 9.
+        self.shift_index = int(FO.w) // 2
+        self.shift_time = self.shift_index * self.dt
         self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
         if self.n_window > 1:  # more than 1 window
             self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)

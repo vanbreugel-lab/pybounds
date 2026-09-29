@@ -54,7 +54,7 @@ class TestSlidingFisherValues:
         assert np.all(np.diff(t) >= 0)
 
     def test_shift_index(self, sliding_fisher):
-        expected = int(np.round(0.5 * WINDOW_SIZE))
+        expected = WINDOW_SIZE // 2
         assert sliding_fisher.shift_index == expected
 
     def test_fo_list_length(self, sliding_fisher):
@@ -68,3 +68,20 @@ class TestSlidingFisherDefaults:
         sfo_default = pybounds.SlidingFisherObservability(seom.O_df_sliding, R={'r': 0.1})
         sfo_explicit = pybounds.SlidingFisherObservability(seom.O_df_sliding, R={'r': 0.1}, lam=1e-8)
         assert np.allclose(sfo_default.EV[['g', 'd']].values, sfo_explicit.EV[['g', 'd']].values)
+
+
+class TestSlidingFisherTimeAlignment:
+
+    @pytest.mark.parametrize('w', [3, 4, 5, 6, 7, 9])
+    def test_error_variance_stamped_at_window_center(self, w):
+        n_window, dt = 8, 0.1
+        time = np.arange(n_window + w - 1) * dt
+        index = pd.MultiIndex.from_tuples([('r', k) for k in range(w)], names=['sensor', 'time_step'])
+        rng = np.random.default_rng(1)
+        O_list = [pd.DataFrame(rng.normal(size=(w, 2)), index=index, columns=['g', 'd']) for _ in range(n_window)]
+        sfo = pybounds.SlidingFisherObservability(O_list, R=0.1, time=time)
+        assert sfo.shift_index == w // 2
+        ev = sfo.get_minimum_error_variance()
+        first = ev.dropna(subset=['g']).iloc[0]
+        assert np.isclose(first['time_initial'], 0.0)
+        assert np.isclose(first['time'], (w // 2) * dt)
