@@ -2,6 +2,9 @@ import numpy as np
 import pandas as pd
 import sympy as sp
 import warnings
+import pickle
+import pickletools
+import sys
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +31,32 @@ def _pool_initializer(factory):
     """Create one Simulator per worker process."""
     global _process_simulator
     _process_simulator = factory()
+
+
+def _check_spawn_picklable(obj, name):
+    """Raise a clear error if spawned worker processes could not load obj.
+
+    Spawned workers import functions by module and name. Functions defined in an interactive
+    __main__ (e.g. a Jupyter notebook) cannot be imported, which makes the pool hang, and
+    lambdas / nested functions cannot be pickled at all.
+    """
+    if obj is None:
+        return
+
+    try:
+        data = pickle.dumps(obj, protocol=2)  # protocol 2 names every global as 'module name'
+    except Exception as e:
+        raise ValueError(f'{name} must be picklable for process-based parallelism '
+                         f'(lambdas and nested functions are not); define it at module level') from e
+
+    main_has_file = getattr(sys.modules.get('__main__'), '__file__', None) is not None
+    if not main_has_file:
+        for opcode, arg, _ in pickletools.genops(data):
+            if opcode.name == 'GLOBAL' and arg.split(' ')[0] == '__main__':
+                raise ValueError(
+                    f'{name} uses {arg.split(" ", 1)[1]!r}, which is defined in an interactive session '
+                    f'(e.g. a Jupyter notebook) that worker processes cannot import. Move it into a .py '
+                    f'file and import it from there, or use parallel_sliding=False.')
 
 
 def _compute_window(args):
@@ -277,6 +306,8 @@ class SlidingEmpiricalObservabilityMatrix:
             only safe when the simulator's simulate() is thread-safe; ignored for pybounds.Simulator).
         :param callable simulator_factory: zero-argument callable that returns a fresh Simulator.
             Required for correct process-based parallelism (``parallel_sliding=True``).
+            It (and z_function) must be importable by worker processes: define it in a .py file,
+            not in a Jupyter notebook or interactive session, or a ValueError is raised.
             Each worker process will call factory() once to create its own Simulator instance,
             avoiding the thread-safety issues of CasADi/IDAS.  Example::
 
@@ -385,6 +416,8 @@ class SlidingEmpiricalObservabilityMatrix:
                 # ---- Process-based parallelism (safe with CasADi/IDAS) ----
                 # Each worker process gets its own Simulator via the factory.
                 import os
+                _check_spawn_picklable(self.simulator_factory, 'simulator_factory')
+                _check_spawn_picklable(self.z_function, 'z_function')
                 n_workers = self.n_workers or min(self.n_point, os.cpu_count() or 1)
                 args_list = [
                     (n, self.O_index, self.x_sim, self.u_sim, self.t_sim,

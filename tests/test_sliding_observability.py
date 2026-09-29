@@ -132,3 +132,55 @@ class TestSEOMDictOrder:
             simulator, t_sim[:N_STEPS_SLIDING], x_rev, u_s, w=WINDOW_SIZE, eps=EPS)
         for O_rev, O in zip(seom_rev.O_sliding, seom.O_sliding):
             assert np.allclose(O_rev, O)
+
+
+def _module_level_factory():
+    return AnalyticSimulator()
+
+
+class TestSpawnPicklabilityCheck:
+    """parallel_sliding with a simulator_factory must fail fast, not hang, for callables workers can't load."""
+
+    @pytest.fixture
+    def interactive_main(self, monkeypatch):
+        """Pretend we're in a notebook: __main__ has no __file__, and a factory is defined there."""
+        import sys
+        import types
+        main = types.ModuleType('__main__')
+        monkeypatch.setitem(sys.modules, '__main__', main)
+
+        def make_sim():
+            return AnalyticSimulator()
+        make_sim.__module__ = '__main__'
+        make_sim.__qualname__ = 'make_sim'
+        main.make_sim = make_sim
+        return make_sim
+
+    def _seom(self, simulation_output, **kwargs):
+        t_sim, x_sim, u_sim, _ = simulation_output
+        return pybounds.SlidingEmpiricalObservabilityMatrix(
+            AnalyticSimulator(), t_sim[:N_STEPS_SLIDING],
+            {k: v[:N_STEPS_SLIDING] for k, v in x_sim.items()},
+            {k: v[:N_STEPS_SLIDING] for k, v in u_sim.items()},
+            w=WINDOW_SIZE, eps=EPS, parallel_sliding=True, **kwargs)
+
+    def test_factory_from_interactive_main_raises(self, simulation_output, interactive_main):
+        with pytest.raises(ValueError, match="simulator_factory uses 'make_sim'.*interactive session"):
+            self._seom(simulation_output, simulator_factory=interactive_main)
+
+    def test_partial_wrapping_interactive_function_raises(self, simulation_output, interactive_main):
+        import functools
+        with pytest.raises(ValueError, match="interactive session"):
+            self._seom(simulation_output, simulator_factory=functools.partial(interactive_main))
+
+    def test_z_function_from_interactive_main_raises(self, simulation_output, interactive_main):
+        with pytest.raises(ValueError, match="z_function uses 'make_sim'"):
+            self._seom(simulation_output, simulator_factory=_module_level_factory, z_function=interactive_main)
+
+    def test_lambda_factory_raises(self, simulation_output):
+        with pytest.raises(ValueError, match='simulator_factory must be picklable'):
+            self._seom(simulation_output, simulator_factory=lambda: AnalyticSimulator())
+
+    def test_module_level_factory_passes_check(self, interactive_main):
+        from pybounds.observability import _check_spawn_picklable
+        _check_spawn_picklable(_module_level_factory, 'simulator_factory')  # no error
