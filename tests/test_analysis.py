@@ -413,3 +413,110 @@ def test_works_without_jax():
             "    raise AssertionError('expected ImportError')\n")
     out = subprocess.run([sys.executable, '-W', 'ignore', '-c', code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
+
+
+def _module_level_factory():
+    return AnalyticSimulator()
+
+
+class TestSettingsYaml:
+
+    def _roundtrip(self, simulator, trajectory, tmp_path, **settings):
+        oa = ObservabilityAnalysis(simulator, *trajectory, **settings)
+        path = oa.save_settings(tmp_path / 'settings.yaml')
+        loaded = ObservabilityAnalysis(simulator, *trajectory).load_settings(path)
+        return oa, loaded, path
+
+    @pytest.mark.parametrize('R', [0.1, {'r': 0.1}, None])
+    def test_roundtrip_reproduces_settings_and_results(self, simulator, trajectory, tmp_path, R):
+        oa, loaded, _ = self._roundtrip(simulator, trajectory, tmp_path, w=WINDOW_SIZE, eps=1e-4, R=R, lam=1e-6)
+        assert loaded.settings == oa.settings
+        with pytest.warns(UserWarning, match='R not set') if R is None else _no_warning():
+            pd.testing.assert_frame_equal(loaded.run().min_error_variance(), oa.run().min_error_variance())
+
+    def test_matrix_R_roundtrip(self, simulator, trajectory, tmp_path, seom):
+        O = seom.O_df_sliding[0]
+        R_df = pd.DataFrame(0.1 * np.eye(len(O)), index=O.index, columns=O.index)
+        for R in (R_df, 0.2 * np.eye(len(O))):
+            _, loaded, _ = self._roundtrip(simulator, trajectory, tmp_path, w=WINDOW_SIZE, R=R)
+            if isinstance(R, pd.DataFrame):
+                pd.testing.assert_frame_equal(loaded.settings['R'], R)
+            else:
+                np.testing.assert_array_equal(loaded.settings['R'], R)
+
+    def test_lam_limit_roundtrip(self, simulator, trajectory, tmp_path):
+        _, loaded, _ = self._roundtrip(simulator, trajectory, tmp_path, lam='limit')
+        assert loaded.settings['lam'] == 'limit'
+
+    def test_file_is_plain_yaml(self, simulator, trajectory, tmp_path):
+        import yaml
+        _, _, path = self._roundtrip(simulator, trajectory, tmp_path, w=WINDOW_SIZE, eps=1e-4, R={'r': 0.1})
+        document = yaml.safe_load(open(path))
+        assert set(document) == {'pybounds_version', 'created', 'settings', 'references', 'simulator'}
+        assert document['settings'] == {'method': 'empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
+                                        'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
+        assert document['simulator']['state_names'] == ['g', 'd']
+        assert document['simulator']['dt'] == 0.01
+
+    def test_loading_replaces_method_options(self, simulator, trajectory, tmp_path):
+        path = ObservabilityAnalysis(simulator, *trajectory, eps=1e-4).save_settings(tmp_path / 's.yaml')
+        oa = ObservabilityAnalysis(simulator, *trajectory, parallel_perturbation=True).load_settings(path)
+        assert 'parallel_perturbation' not in oa.settings
+        assert oa.settings['eps'] == 1e-4
+
+    def test_loading_discards_computed_results(self, oa_fresh, tmp_path):
+        path = oa_fresh.save_settings(tmp_path / 's.yaml')
+        oa_fresh.load_settings(path)
+        assert not oa_fresh.is_computed
+
+    def test_callables_are_references_only(self, simulator, trajectory, tmp_path):
+        import yaml
+        oa = ObservabilityAnalysis(simulator, *trajectory, z_function=z_optic_flow, z_state_names=['q', 'd'],
+                                   simulator_factory=_module_level_factory, aux_list=[None] * N_STEPS_SLIDING)
+        path = oa.save_settings(tmp_path / 's.yaml')
+        references = yaml.safe_load(open(path))['references']
+        assert references == {'aux_list': '<set>', 'z_function': 'test_analysis:z_optic_flow',
+                              'simulator_factory': 'test_analysis:_module_level_factory'}
+        with pytest.warns(UserWarning, match=r"references \['aux_list', 'z_function', 'simulator_factory'\]"):
+            fresh = ObservabilityAnalysis(simulator, *trajectory).load_settings(path)
+        assert fresh.settings['z_function'] is None and fresh.settings['z_state_names'] == ['q', 'd']
+        # no warning when they are already set, and they are kept
+        same = ObservabilityAnalysis(simulator, *trajectory, z_function=z_optic_flow,
+                                     simulator_factory=_module_level_factory, aux_list=[None] * N_STEPS_SLIDING)
+        with _no_warning():
+            same.load_settings(path)
+        assert same.settings['simulator_factory'] is _module_level_factory
+
+    def test_simulator_mismatch_warns(self, simulator, trajectory, tmp_path):
+        path = ObservabilityAnalysis(simulator, *trajectory).save_settings(tmp_path / 's.yaml')
+        other = pybounds.Simulator(lambda X, U: [U[0], 0 * U[0]], lambda X, U: [X[0] / X[1]], dt=0.02,
+                                   state_names=['g', 'd'], input_names=['u'], measurement_names=['r'])
+        with pytest.warns(UserWarning, match=r"differs from the one recorded .*\['dt', 'params_simulator'\]"):
+            ObservabilityAnalysis(other, *trajectory).load_settings(path)
+
+    def test_hand_written_numbers(self, simulator, trajectory, tmp_path):
+        path = tmp_path / 'hand.yaml'
+        path.write_text('settings:\n  w: 6\n  lam: 1e-6\n  eps: 1e-4\n  R:\n    r: 1e-1\n')
+        oa = ObservabilityAnalysis(simulator, *trajectory).load_settings(path)
+        assert oa.settings['lam'] == 1e-6 and oa.settings['eps'] == 1e-4 and oa.settings['R'] == {'r': 0.1}
+
+    def test_external_analysis_loads_only_R_and_lam(self, seom, tmp_path):
+        path = tmp_path / 's.yaml'
+        path.write_text('settings:\n  w: 3\n  R: 0.5\n  lam: 1.0e-06\n')
+        oa = ObservabilityAnalysis.from_sliding(seom)
+        with pytest.warns(UserWarning, match=r"ignoring \['w'\]"):
+            oa.load_settings(path)
+        assert oa.settings['R'] == 0.5 and oa.settings['lam'] == 1e-6 and oa.is_computed
+
+
+class _no_warning:
+    """Context manager asserting that no warning is raised."""
+
+    def __enter__(self):
+        import warnings
+        self._catcher = warnings.catch_warnings()
+        self._catcher.__enter__()
+        warnings.simplefilter('error')
+
+    def __exit__(self, *exc):
+        self._catcher.__exit__(*exc)

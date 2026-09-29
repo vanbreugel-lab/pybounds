@@ -6,3 +6,4 @@ pandas>=1.4.3
 scipy>=1.7.0
 sympy>=1.9
 casadi
+pyyaml>=5.1

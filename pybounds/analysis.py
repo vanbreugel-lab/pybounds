@@ -14,10 +14,12 @@ the class does not change.
 import sys
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, NamedTuple
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from .observability import (DEFAULT_LAM, SlidingEmpiricalObservabilityMatrix, SlidingFisherObservability,
                             ObservabilityMatrixImage, _ordered_values, _transform_O_df_list)
@@ -140,6 +142,93 @@ def _as_list(x, name):
     return x
 
 
+def _to_plain(x):
+    """Recursively convert numpy / tuple values to plain Python for yaml.safe_dump."""
+    if isinstance(x, dict):
+        return {str(k): _to_plain(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_to_plain(v) for v in x]
+    if isinstance(x, np.ndarray):
+        return _to_plain(x.tolist())
+    if isinstance(x, np.generic):
+        return x.item()
+    return x
+
+
+def _is_plain(x):
+    """True if x can be written with yaml.safe_dump after _to_plain."""
+    try:
+        yaml.safe_dump(_to_plain(x))
+        return True
+    except yaml.YAMLError:
+        return False
+
+
+def _reference(obj):
+    """Record of a non-serializable setting: 'module:qualname' for callables, '<set>' otherwise."""
+    if obj is None:
+        return None
+    qualname = getattr(obj, '__qualname__', None)
+    if callable(obj) and qualname is not None:
+        return f'{getattr(obj, "__module__", "?")}:{qualname}'
+    return '<set>'
+
+
+def _R_to_yaml(R):
+    if R is None or isinstance(R, (int, float, np.number)):
+        return None if R is None else float(R)
+    if isinstance(R, dict):
+        return {str(k): float(v) for k, v in R.items()}
+    if isinstance(R, pd.DataFrame):
+        return {'_matrix': _to_plain(R.values), '_index': [_to_plain(list(i)) for i in R.index]}
+    R = np.asarray(R, dtype=float)
+    if R.ndim == 2:
+        return {'_matrix': _to_plain(R), '_index': None}
+    return float(R.squeeze())
+
+
+def _R_from_yaml(R):
+    if isinstance(R, dict) and '_matrix' in R:
+        matrix = np.asarray(R['_matrix'], dtype=float)
+        if R.get('_index') is None:
+            return matrix
+        index = pd.MultiIndex.from_tuples([tuple(i) for i in R['_index']], names=['sensor', 'time_step'])
+        return pd.DataFrame(matrix, index=index, columns=index)
+    return R
+
+
+def _number(x):
+    """Numbers written by hand like 1e-8 are read by YAML as strings; convert them back."""
+    if isinstance(x, str):
+        try:
+            return float(x)
+        except ValueError:
+            return x
+    return x
+
+
+def _coerce_numbers(settings):
+    for key in ('lam', 'eps'):
+        if key in settings:
+            settings[key] = _number(settings[key])
+    if isinstance(settings.get('w'), (str, float)):
+        settings['w'] = int(float(settings['w']))
+    R = settings.get('R')
+    if isinstance(R, dict) and '_matrix' not in R:
+        settings['R'] = {k: _number(v) for k, v in R.items()}
+    elif isinstance(R, str):
+        settings['R'] = _number(R)
+    return settings
+
+
+def _pybounds_version():
+    try:
+        from importlib.metadata import version
+        return version('pybounds')
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # ObservabilityAnalysis
 # ---------------------------------------------------------------------------
@@ -257,6 +346,98 @@ class ObservabilityAnalysis:
             self._discard_results()
         else:
             self.clear_cache()
+        return self
+
+    # ------------------------------------------------------------------ settings files (YAML)
+
+    _REFERENCE_SETTINGS = ('aux_list', 'z_function')
+
+    def _settings_document(self):
+        """All settings as plain data: hyperparameters, references to non-serializable settings,
+        a record of the simulator, and metadata."""
+        hyperparameters = {'method': self.method, 'w': self._settings['w'],
+                           'z_state_names': self._settings['z_state_names'],
+                           'R': _R_to_yaml(self._settings['R']), 'lam': self._settings['lam']}
+        references = {k: _reference(self._settings[k]) for k in self._REFERENCE_SETTINGS}
+        for key, value in self._method_options.items():
+            if callable(value) or not _is_plain(value):
+                references[key] = _reference(value)
+            else:
+                hyperparameters[key] = value
+        return {'pybounds_version': _pybounds_version(),
+                'created': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                'settings': _to_plain(hyperparameters),
+                'references': references,
+                'simulator': self._simulator_record()}
+
+    def _simulator_record(self):
+        sim = self.simulator
+        if sim is None:
+            return None
+        record = {'type': f'{type(sim).__module__}.{type(sim).__qualname__}'}
+        for attr in ('dt', 'state_names', 'input_names', 'measurement_names', 'integrator', 'substeps',
+                     'mpc_horizon', 'params_simulator'):
+            if hasattr(sim, attr):
+                value = _to_plain(getattr(sim, attr))
+                if _is_plain(value):
+                    record[attr] = value
+        return record
+
+    def save_settings(self, path):
+        """Write all settings to a YAML file.
+
+        Callables and other non-serializable settings (z_function, simulator_factory, aux_list) are
+        recorded by reference only; pass them again when loading. The simulator is recorded for checking.
+        """
+        with open(path, 'w') as f:
+            yaml.safe_dump(self._settings_document(), f, sort_keys=False)
+        return path
+
+    def load_settings(self, path):
+        """Apply the settings in a YAML file written by save_settings (or a save_results sidecar).
+
+        Method options not in the file are removed. Non-serializable settings are never loaded from
+        the file: if the file references one that isn't set on this analysis, a warning says to pass
+        it with update_settings. Differences from the recorded simulator are warned about.
+        """
+        with open(path) as f:
+            document = yaml.safe_load(f)
+        if 'settings' not in document and isinstance(document.get('analysis'), dict):
+            document = document['analysis']   # a save_results sidecar
+        settings = _coerce_numbers(dict(document.get('settings') or {}))
+        references = document.get('references') or {}
+        if 'R' in settings:
+            settings['R'] = _R_from_yaml(settings['R'])
+
+        if self._external:
+            ignored = sorted(set(settings) - set(self._QUERY_SETTINGS))
+            if ignored:
+                warnings.warn(f'this analysis wraps existing observability matrices; ignoring {ignored}',
+                              UserWarning, stacklevel=2)
+            self.update_settings(**{k: v for k, v in settings.items() if k in self._QUERY_SETTINGS})
+            return self
+
+        # Replace the method options with the file's, keeping currently set non-serializable ones
+        for key in self._method_options:
+            if key not in settings and key not in references:
+                settings[key] = None
+        missing = [k for k, ref in references.items() if ref is not None and self.settings.get(k) is None]
+        if missing:
+            warnings.warn(f'{path} references {missing}, which cannot be loaded from a file; '
+                          f'set them with update_settings(...)', UserWarning, stacklevel=2)
+
+        recorded = document.get('simulator')
+        current = self._simulator_record()
+        if recorded and current:
+            differs = sorted(k for k in set(recorded) | set(current)
+                             if k != 'type' and recorded.get(k) != current.get(k))
+            if recorded.get('type') != current.get('type'):
+                differs.insert(0, 'type')
+            if differs:
+                warnings.warn(f'the simulator differs from the one recorded in {path}: {differs}',
+                              UserWarning, stacklevel=2)
+
+        self.update_settings(**settings)
         return self
 
     @staticmethod
