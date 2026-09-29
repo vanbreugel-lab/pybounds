@@ -155,6 +155,18 @@ class TestSimulateOutputValues:
         _, x_sim, *_ = simulator.simulate(x0=x0, u=u, return_full_output=True)
         assert np.all(np.diff(x_sim['g']) < 0)
 
+    @pytest.mark.parametrize('x0', [[1.5, 2.0], (1.5, 2.0), np.array([1.5, 2.0])])
+    def test_x0_sequence_formats(self, simulator, x0):
+        u = {'u': np.zeros(10)}
+        _, x_sim, *_ = simulator.simulate(x0=x0, u=u, return_full_output=True)
+        assert np.isclose(x_sim['g'][0], 1.5)
+        assert np.isclose(x_sim['d'][0], 2.0)
+
+    def test_invalid_x0_type_raises(self, simulator):
+        u = {'u': np.zeros(10)}
+        with pytest.raises(ValueError, match='x0 must be either'):
+            simulator.simulate(x0='bad', u=u)
+
     def test_mpc_and_u_both_set_raises(self, simulator):
         u = {'u': np.ones(10)}
         with pytest.raises(Exception, match='u must be None if running MPC'):

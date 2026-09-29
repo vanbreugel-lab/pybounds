@@ -252,8 +252,7 @@ class Simulator(object):
         if x0 is not None:  # initial state given
             if isinstance(x0, dict):  # in dict format
                 SetDict().set_dict_with_overwrite(self.x0, x0)  # update only the states in the dict given
-            elif isinstance(x0, list) or isinstance(x0, tuple) or (
-            x0, np.ndarray):  # list, tuple,  or numpy array format
+            elif isinstance(x0, (list, tuple, np.ndarray)):  # list, tuple,  or numpy array format
                 x0 = np.array(x0).squeeze()
                 for n, key in enumerate(self.x0.keys()):  # each state
                     self.x0[key] = x0[n]
