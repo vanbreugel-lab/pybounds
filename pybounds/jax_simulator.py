@@ -110,6 +110,8 @@ class JaxSimulator:
                  integrator='rk4', substeps=1):
         if isinstance(substeps, bool) or not isinstance(substeps, (int, np.integer)) or substeps < 1:
             raise ValueError(f'substeps must be a positive integer, got {substeps!r}')
+        if integrator not in ('rk4', 'euler'):
+            raise ValueError(f"integrator must be 'rk4' or 'euler', got {integrator!r}")
 
         self.f_jax = f_jax
         self.h_jax = h_jax

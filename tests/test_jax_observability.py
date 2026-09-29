@@ -463,3 +463,17 @@ class TestJaxPrecisionScope:
         assert eom.O.dtype == np.float64
         assert s.O_sliding[0].dtype == np.float64
         assert jnp.ones(1).dtype == jnp.float32
+
+
+class TestJaxIntegratorChoice:
+    @pytest.mark.parametrize('integrator', ['RK4', 'rk45', 'Euler', None])
+    def test_unknown_integrator_raises(self, integrator):
+        with pytest.raises(ValueError, match="integrator must be 'rk4' or 'euler'"):
+            _decay_sim(0.1, integrator=integrator)
+
+    def test_euler_and_rk4_differ(self):
+        u = np.zeros((3, 1))
+        y_rk4 = _decay_sim(0.01, integrator='rk4').simulate([1.0], u)
+        y_euler = _decay_sim(0.01, integrator='euler').simulate([1.0], u)
+        np.testing.assert_allclose(y_euler[:, 0], (1 - 0.2) ** np.arange(3))
+        assert not np.allclose(y_rk4, y_euler)
