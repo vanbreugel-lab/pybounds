@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import pybounds
-from conftest import N_STEPS, EPS, STATE_NAMES, MEASUREMENT_NAMES
+from conftest import N_STEPS, EPS, DT, STATE_NAMES, MEASUREMENT_NAMES
 
 
 class TestEOMTypes:
@@ -74,3 +74,32 @@ class TestEOMNumericalProperties:
         eom2 = pybounds.EmpiricalObservabilityMatrix(simulator, x0, u, eps=1e-5)
         ratio = np.linalg.norm(eom1.O) / np.linalg.norm(eom2.O)
         assert 0.5 < ratio < 2.0
+
+
+class AnalyticSimulator:
+    """Stateless closed-form version of the conftest system, so it is thread-safe."""
+
+    def simulate(self, x0, u, aux=None):
+        g0, d0 = x0
+        g = g0 + DT * np.concatenate([[0.0], np.cumsum(np.ravel(u))[:-1]])
+        return (g / d0)[:, None]
+
+
+class TestEOMParallel:
+
+    def test_parallel_with_pybounds_simulator_warns_and_matches_sequential(self, simulator, eom):
+        x0 = {'g': 2.0, 'd': 3.0}
+        u = {'u': 0.1 * np.ones(N_STEPS)}
+        with pytest.warns(RuntimeWarning, match='not thread-safe'):
+            eom_par = pybounds.EmpiricalObservabilityMatrix(simulator, x0, u, eps=EPS, parallel=True)
+        assert eom_par.parallel is False
+        assert np.allclose(eom_par.O, eom.O)
+
+    def test_parallel_with_thread_safe_simulator_runs_threaded(self, recwarn):
+        x0 = np.array([2.0, 3.0])
+        u = 0.1 * np.ones((N_STEPS, 1))
+        eom_seq = pybounds.EmpiricalObservabilityMatrix(AnalyticSimulator(), x0, u, eps=EPS)
+        eom_par = pybounds.EmpiricalObservabilityMatrix(AnalyticSimulator(), x0, u, eps=EPS, parallel=True)
+        assert eom_par.parallel is True
+        assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+        assert np.allclose(eom_par.O, eom_seq.O)

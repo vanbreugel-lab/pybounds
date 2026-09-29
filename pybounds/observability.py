@@ -7,6 +7,7 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 
+from .simulator import Simulator
 from .util import LatexStates
 from .jacobian import SymbolicJacobian
 
@@ -62,7 +63,8 @@ class EmpiricalObservabilityMatrix:
         :param dict/np.array u: inputs array
         :param aux: auxiliary input that can be passed to Simulator class
         :param float eps: epsilon value for perturbations to construct O, should be small number
-        :param bool parallel: if True, run the perturbations in parallel
+        :param bool parallel: if True, run the perturbations in parallel using threads.
+            Only safe for thread-safe custom simulators; ignored (with a warning) for pybounds.Simulator
         :param callable z_function: function that transforms coordinates from original to new states
             must be of the form z = z_function(x), where x & z are the same size
             should use sympy functions wherever possible
@@ -153,6 +155,18 @@ class EmpiricalObservabilityMatrix:
         if parallel is not None:
             self.parallel = parallel
 
+        # The CasADi/IDAS integrator inside Simulator is stateful, so threads sharing one instance
+        # corrupt each other's runs. Only custom thread-safe simulators can run in parallel here.
+        if self.parallel and isinstance(self.simulator, Simulator):
+            warnings.warn(
+                'parallel=True is not thread-safe with pybounds.Simulator (CasADi/IDAS); '
+                'running perturbations sequentially instead. '
+                'Use SlidingEmpiricalObservabilityMatrix(parallel_sliding=True, simulator_factory=...) '
+                'for process-based parallelism.',
+                RuntimeWarning, stacklevel=2,
+            )
+            self.parallel = False
+
         # Run simulations for perturbed initial conditions
         state_index = np.arange(0, self.n).tolist()
         if self.parallel:  # multiprocessing
@@ -230,7 +244,7 @@ class SlidingEmpiricalObservabilityMatrix:
             Requires ``simulator_factory`` when parallel_sliding=True (see below).
             Falls back to ThreadPoolExecutor (unsafe with CasADi) when no factory is provided.
         :param bool parallel_perturbation: if True, run the perturbations in parallel (thread-based,
-            only safe when the simulator's simulate() is thread-safe).
+            only safe when the simulator's simulate() is thread-safe; ignored for pybounds.Simulator).
         :param callable simulator_factory: zero-argument callable that returns a fresh Simulator.
             Required for correct process-based parallelism (``parallel_sliding=True``).
             Each worker process will call factory() once to create its own Simulator instance,
