@@ -27,6 +27,9 @@ Observability
    :members:
    :show-inheritance:
 
+.. autoclass:: pybounds.ObservabilityAnalysis
+   :members:
+
 .. autofunction:: pybounds.compute_observability
 
 Visualisation

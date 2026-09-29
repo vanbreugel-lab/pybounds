@@ -52,6 +52,10 @@ No linter is configured. Functionality is also demonstrated through Jupyter note
 4. `FisherObservability` / `SlidingFisherObservability` compute F = OᵀR⁻¹O and invert for minimum error variance.
 5. Results can be projected into transformed coordinates via `transform_states()`.
 
+### ObservabilityAnalysis
+
+[pybounds/analysis.py](pybounds/analysis.py) — `ObservabilityAnalysis` is the high-level API: configure → `run()` → query. Nothing is computed until `run()`; queries (`min_error_variance`, `fisher`, `observability_matrix`, `plot_observability_matrix`, `save_results`) raise until then. After `run()` it keeps every window's O, so states/sensors/time_steps can be sub-selected (state selection is conditional: other states treated as known) and R/lam changed without rebuilding O. Changing an O-building setting (`method`, `w`, `aux_list`, `z_function`, `z_state_names`, method options) discards results. Settings save/load as YAML (`save_settings` / `load_settings`, never importing code from the file); `save_results` writes a CSV + YAML sidecar (+ optional `.npz` of all O's). How O is built is pluggable: `_BUILDERS` maps a method name to a function returning a `SlidingO` (`'empirical'`, `'jax'`); a new way of building O is one builder plus a registry entry. The class applies `z_function` itself. `compute_observability()` is a thin wrapper around it.
+
 ### JAX backend
 
 `JaxSimulator`, `JaxEmpiricalObservabilityMatrix`, and `JaxSlidingEmpiricalObservabilityMatrix` (in [pybounds/jax_simulator.py](pybounds/jax_simulator.py)) replace finite-difference Jacobians with exact autodiff via `jax.jacfwd` + `jax.vmap`. Requires `f` and `h` to use `jax.numpy` instead of `numpy`. The `compute_observability()` helper accepts `use_jax=True` to route through this backend.
