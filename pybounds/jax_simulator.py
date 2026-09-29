@@ -37,7 +37,7 @@ import jax
 import jax.numpy as jnp
 
 from .jacobian import SymbolicJacobian
-from .observability import transform_states
+from .observability import transform_states, _TransformJacobianAliases
 
 jax.config.update("jax_enable_x64", True)   # use float64 to match do_mpc precision
 
@@ -193,7 +193,7 @@ class JaxSimulator:
 # JaxEmpiricalObservabilityMatrix
 # ---------------------------------------------------------------------------
 
-class JaxEmpiricalObservabilityMatrix:
+class JaxEmpiricalObservabilityMatrix(_TransformJacobianAliases):
     """Observability matrix via JAX forward-mode autodiff.
 
     Replaces the 2n numerical perturbation simulations used by
@@ -272,7 +272,7 @@ class JaxEmpiricalObservabilityMatrix:
 
         # Perform coordinate transformation on O, if specified
         if z_function is not None:
-            self.O_df, self.dzdx, self.dxdz_sym = transform_states(O=self.O_df,
+            self.O_df, self.dxdz, self.dzdx_sym = transform_states(O=self.O_df,
                                                                    square_flag=False,
                                                                    z_function=z_function,
                                                                    x0=np.array(x0_arr),
@@ -280,8 +280,8 @@ class JaxEmpiricalObservabilityMatrix:
             self.state_names = list(self.O_df.columns)
             self.O = self.O_df.values
         else:
-            self.dzdx = None
-            self.dxdz_sym = None
+            self.dxdz = None
+            self.dzdx_sym = None
 
 
 # ---------------------------------------------------------------------------
@@ -457,12 +457,12 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names):
     builds (and simplifies) the symbolic Jacobian only once.
     """
     x_sym = sp.symbols('x_0:%d' % O_df_list[0].shape[1])
-    dxdz_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+    dzdx_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
 
     O_df_z = []
     for O_df, x0 in zip(O_df_list, x0_list):
-        dzdx = np.linalg.inv(dxdz_function(np.array(x0)))
-        O_z = O_df @ dzdx
+        dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
+        O_z = O_df @ dxdz
         if z_state_names is not None:
             O_z.columns = z_state_names
         O_df_z.append(O_z)

@@ -65,7 +65,23 @@ def _ordered_values(d, names, label):
     return [d[k] for k in names]
 
 
-class EmpiricalObservabilityMatrix:
+class _TransformJacobianAliases:
+    """Deprecated attribute names from before the transform Jacobians were correctly labeled."""
+
+    @property
+    def dzdx(self):
+        warnings.warn('dzdx is deprecated: it has always held dx/dz. Use dxdz instead.',
+                      DeprecationWarning, stacklevel=2)
+        return self.dxdz
+
+    @property
+    def dxdz_sym(self):
+        warnings.warn('dxdz_sym is deprecated: it has always held the symbolic dz/dx. Use dzdx_sym instead.',
+                      DeprecationWarning, stacklevel=2)
+        return self.dzdx_sym
+
+
+class EmpiricalObservabilityMatrix(_TransformJacobianAliases):
     def __init__(self, simulator, x0, u, aux=None, eps=1e-5, parallel=False,
                  z_function=None, z_state_names=None):
         """ Construct an empirical observability matrix O.
@@ -150,7 +166,7 @@ class EmpiricalObservabilityMatrix:
 
         # Perform coordinate transformation on O, if specified
         if z_function is not None:
-            self.O_df, self.dzdx, self.dxdz_sym = transform_states(O=self.O_df,
+            self.O_df, self.dxdz, self.dzdx_sym = transform_states(O=self.O_df,
                                                                    square_flag=False,
                                                                    z_function=z_function,
                                                                    x0=self.x0,
@@ -158,8 +174,8 @@ class EmpiricalObservabilityMatrix:
             self.state_names = tuple(self.O_df.columns)
             self.O = self.O_df.values
         else:
-            self.dzdx = None
-            self.dxdz_sym = None
+            self.dxdz = None
+            self.dzdx_sym = None
 
     def run(self, parallel=None):
         """ Construct empirical observability matrix.
@@ -707,8 +723,8 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
 
         :return:
             Z: observability matrix or Fisher information matrix in transformed coordinates
-            dzdx: numerical Jacobian dz/dx (inverse of dx/dz) evaluated at x0
-            dxdz_sym: symbolic Jacobian dx/dz
+            dxdz: numerical Jacobian dx/dz (inverse of dz/dx) evaluated at x0, so that O_z = O @ dxdz
+            dzdx_sym: symbolic Jacobian dz/dx of z_function
     """
 
     # Symbolic vector of original states
@@ -717,23 +733,23 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
     # Initialize the Jacobian calculator with a Python function
     jacobian_calculator_func = SymbolicJacobian(func=z_function, state_vars=x_sym)
 
-    # Get the symbolic Jacobian dx/dz
-    dxdz_sym = jacobian_calculator_func.jacobian_symbolic
+    # Get the symbolic Jacobian dz/dx
+    dzdx_sym = jacobian_calculator_func.jacobian_symbolic
 
     # Get the Jacobian calculator function
-    dxdz_function = jacobian_calculator_func.get_jacobian_function()
+    dzdx_function = jacobian_calculator_func.get_jacobian_function()
 
     # Evaluate the Jacobian at x0
-    dxdz = dxdz_function(np.array(x0))
+    dzdx = dzdx_function(np.array(x0))
 
     # Take the inverse
-    dzdx = np.linalg.inv(dxdz)
+    dxdz = np.linalg.inv(dzdx)
 
-    # Compute the new O or F
+    # Compute the new O or F (chain rule: dy/dz = dy/dx @ dx/dz)
     if square_flag:  # F
-        O_z = dzdx.T @ O @ dzdx
+        O_z = dxdz.T @ O @ dxdz
     else:  # O
-        O_z = O @ dzdx
+        O_z = O @ dxdz
 
     # Set column/index names if data-frame was passed
     if isinstance(O_z, pd.DataFrame):
@@ -742,7 +758,7 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
             if square_flag:
                 O_z.index = z_state_names
 
-    return O_z, dzdx, dxdz_sym
+    return O_z, dxdz, dzdx_sym
 
 
 class ObservabilityMatrixImage:

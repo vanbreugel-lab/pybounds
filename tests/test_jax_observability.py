@@ -221,13 +221,13 @@ class TestJaxZFunction:
                                                       z_state_names=Z_STATE_NAMES)
         assert list(jax_eom_z.O_df.columns) == Z_STATE_NAMES
         assert jax_eom_z.state_names == Z_STATE_NAMES
-        assert jax_eom_z.dzdx is not None
+        assert jax_eom_z.dxdz is not None
         np.testing.assert_array_equal(jax_eom_z.O, jax_eom_z.O_df.values)
         np.testing.assert_allclose(jax_eom_z.O, eom_z.O, atol=1e-3)
 
     def test_eom_without_z_has_no_jacobian(self, jax_eom):
-        assert jax_eom.dzdx is None
-        assert jax_eom.dxdz_sym is None
+        assert jax_eom.dxdz is None
+        assert jax_eom.dzdx_sym is None
 
     @pytest.mark.parametrize('z_state_names', [Z_STATE_NAMES, None])
     def test_sliding_matches_transform_states_per_window(self, jax_sim, jax_seom, seom, z_state_names):
