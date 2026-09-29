@@ -147,3 +147,14 @@ class TestPlotHeatmapLogTimeseries:
         cnorm, cmap, ticks = plot_heatmap_log_timeseries(data)
         assert cnorm is not None
         plt.close('all')
+
+
+class TestLatexStatesDict:
+
+    def test_every_math_entry_is_closed(self):
+        """Each LaTeX label that opens with '$' must also close with '$' (e.g. 'beta' used to render literally)."""
+        broken = {k: v for k, v in LatexStates().dict.items() if v.startswith('$') and not v.endswith('$')}
+        assert broken == {}
+
+    def test_beta(self):
+        assert LatexStates().convert_to_latex('beta') == r'$\beta$'

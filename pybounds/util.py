@@ -116,7 +116,7 @@ class LatexStates:
                      'wz': r'$w_z$',
                      'ax': r'$ax$',
                      'ay': r'$ay$',
-                     'beta': r'$\beta',
+                     'beta': r'$\beta$',
                      'thetadot': r'$\dot{\theta}$',
                      'theta_dot': r'$\dot{\theta}$',
                      'psidot': r'$\dot{\psi}$',
