@@ -60,7 +60,7 @@ t, x, u, _ = sim.simulate(x0={'g': 2.0, 'd': 3.0},
                            return_full_output=True)
 
 # 3. Set up the observability analysis (nothing is computed yet), then run it
-oa = pybounds.ObservabilityAnalysis(sim, t, x, u, w=6, R={'r': 0.1})
+oa = pybounds.ObservabilityAnalysis(sim, t, x, u, w=6, R={'r': 0.1}, lam=1e-8)
 oa.run()
 
 # 4. Plot minimum error variance over time for each state
@@ -71,8 +71,8 @@ plt.show()
 
 - **Window:** `w` is the sliding-window length in time-steps. Without it, the whole trajectory is analyzed as one window.
 - **Noise:** `R` is the measurement noise variance, per sensor.
-- **Regularization:** the Fisher information matrix F is inverted as (F + λI)⁻¹, with λ set by the `lam` argument (default `1e-8`). 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
-- **One-call shortcut:** `pybounds.compute_observability(sim, t, x, u, R={'r': 0.1}, w=6)` returns the same result as steps 3 and 4 in a single call, without keeping the analysis.
+- **Regularization `lam` (λ):** the Fisher information matrix F is inverted as (F + λI)⁻¹. `1e-8` is also the default. 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
+- **One-call shortcut:** `pybounds.compute_observability(sim, t, x, u, R={'r': 0.1}, w=6, lam=1e-8)` returns the same result as steps 3 and 4 in a single call, without keeping the analysis.
 
 ### Selecting states, and saving settings and results
 
