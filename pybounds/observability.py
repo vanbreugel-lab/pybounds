@@ -245,7 +245,8 @@ class SlidingEmpiricalObservabilityMatrix:
         :param float eps: epsilon value for perturbations to construct O's, should be small number
         :param bool parallel_sliding: if True, run the sliding windows in parallel using processes.
             Requires ``simulator_factory`` when parallel_sliding=True (see below).
-            Falls back to ThreadPoolExecutor (unsafe with CasADi) when no factory is provided.
+            Without a factory, custom simulators run in threads (they must be thread-safe), and
+            pybounds.Simulator runs sequentially with a warning.
         :param bool parallel_perturbation: if True, run the perturbations in parallel (thread-based,
             only safe when the simulator's simulate() is thread-safe; ignored for pybounds.Simulator).
         :param callable simulator_factory: zero-argument callable that returns a fresh Simulator.
@@ -342,6 +343,15 @@ class SlidingEmpiricalObservabilityMatrix:
         self.O_sliding = []
         self.O_df_sliding = []
 
+        # Threads sharing one pybounds Simulator corrupt each other's CasADi/IDAS runs
+        if self.parallel_sliding and self.simulator_factory is None and isinstance(self.simulator, Simulator):
+            warnings.warn(
+                'parallel_sliding=True without simulator_factory is not thread-safe with pybounds.Simulator '
+                '(CasADi/IDAS); running windows sequentially instead. '
+                'Pass simulator_factory=<callable> to use process-based parallelism.',
+                RuntimeWarning, stacklevel=2)
+            self.parallel_sliding = False
+
         # Construct O's
         n_point_range = np.arange(0, self.n_point).astype(int)
         if self.parallel_sliding:
@@ -369,14 +379,7 @@ class SlidingEmpiricalObservabilityMatrix:
                         self.window_data[k].append(r[2][k])
 
             else:
-                # ---- Thread-based parallelism (legacy, unsafe with CasADi) ----
-                # Kept for backwards compatibility; raises a warning about thread safety.
-                warnings.warn(
-                    'parallel_sliding=True without simulator_factory uses ThreadPoolExecutor, '
-                    'which is NOT thread-safe with CasADi/IDAS and may crash or produce '
-                    'incorrect results.  Pass simulator_factory=<callable> to use safe '
-                    'process-based parallelism instead.',
-                    RuntimeWarning, stacklevel=2)
+                # ---- Thread-based parallelism, only reached for custom (thread-safe) simulators ----
                 with ThreadPoolExecutor(max_workers=12) as executor:
                     results = list(executor.map(self.construct, n_point_range))
 

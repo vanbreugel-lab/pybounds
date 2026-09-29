@@ -23,6 +23,15 @@ def measurement_h(X, U):
     return [g / d]
 
 
+class AnalyticSimulator:
+    """Stateless closed-form version of this system, so it is thread-safe."""
+
+    def simulate(self, x0, u, aux=None):
+        g0, d0 = x0
+        g = g0 + DT * np.concatenate([[0.0], np.cumsum(np.ravel(u))[:-1]])
+        return (g / d0)[:, None]
+
+
 @pytest.fixture(scope='session')
 def simulator():
     return pybounds.Simulator(

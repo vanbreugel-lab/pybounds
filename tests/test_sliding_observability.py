@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import pybounds
-from conftest import N_STEPS_SLIDING, WINDOW_SIZE, EPS
+from conftest import N_STEPS_SLIDING, WINDOW_SIZE, EPS, AnalyticSimulator
 
 
 class TestSEOMTypes:
@@ -89,3 +89,34 @@ class TestSEOMValidation:
             pybounds.SlidingEmpiricalObservabilityMatrix(
                 simulator, t_s, x_s, u_s, w=6, eps=EPS,
             )
+
+
+class TestSEOMParallel:
+
+    @staticmethod
+    def _trajectory(simulation_output):
+        t_sim, x_sim, u_sim, _ = simulation_output
+        return (t_sim[:N_STEPS_SLIDING],
+                {k: v[:N_STEPS_SLIDING] for k, v in x_sim.items()},
+                {k: v[:N_STEPS_SLIDING] for k, v in u_sim.items()})
+
+    def test_parallel_sliding_with_pybounds_simulator_warns_and_matches_sequential(
+            self, simulator, simulation_output, seom):
+        t_s, x_s, u_s = self._trajectory(simulation_output)
+        with pytest.warns(RuntimeWarning, match='running windows sequentially'):
+            seom_par = pybounds.SlidingEmpiricalObservabilityMatrix(
+                simulator, t_s, x_s, u_s, w=WINDOW_SIZE, eps=EPS, parallel_sliding=True)
+        assert seom_par.parallel_sliding is False
+        for O_par, O_seq in zip(seom_par.O_sliding, seom.O_sliding):
+            assert np.allclose(O_par, O_seq)
+
+    def test_parallel_sliding_with_thread_safe_simulator_runs_threaded(self, simulation_output, recwarn):
+        t_s, x_s, u_s = self._trajectory(simulation_output)
+        seom_seq = pybounds.SlidingEmpiricalObservabilityMatrix(
+            AnalyticSimulator(), t_s, x_s, u_s, w=WINDOW_SIZE, eps=EPS)
+        seom_par = pybounds.SlidingEmpiricalObservabilityMatrix(
+            AnalyticSimulator(), t_s, x_s, u_s, w=WINDOW_SIZE, eps=EPS, parallel_sliding=True)
+        assert seom_par.parallel_sliding is True
+        assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+        for O_par, O_seq in zip(seom_par.O_sliding, seom_seq.O_sliding):
+            assert np.allclose(O_par, O_seq)
