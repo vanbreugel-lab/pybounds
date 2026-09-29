@@ -520,3 +520,76 @@ class _no_warning:
 
     def __exit__(self, *exc):
         self._catcher.__exit__(*exc)
+
+
+class TestSaveResults:
+
+    def test_writes_csv_and_sidecar(self, oa_fresh, tmp_path):
+        import yaml
+        files = oa_fresh.save_results(tmp_path / 'out', states=['d'], time_steps=[0, 1, 2], lam=1e-6)
+        assert set(files) == {'min_error_variance', 'sidecar'}
+        ev = pd.read_csv(files['min_error_variance'])
+        pd.testing.assert_frame_equal(ev, oa_fresh.min_error_variance(states=['d'], time_steps=[0, 1, 2], lam=1e-6),
+                                      check_index_type=False)
+        sidecar = yaml.safe_load(open(files['sidecar']))
+        assert sidecar['selection'] == {'states': ['d'], 'sensors': ['r'], 'time_steps': [0, 1, 2],
+                                        'R': {'r': 0.1}, 'lam': 1e-6, 'force_R_scalar': False}
+        assert sidecar['all_states'] == ['g', 'd']
+        assert sidecar['all_sensors'] == ['r']
+        assert sidecar['all_time_steps'] == list(range(WINDOW_SIZE))
+        assert sidecar['columns'] == ['time', 'time_initial', 'd']
+        assert sidecar['files'] == {'min_error_variance': 'min_error_variance.csv'}
+        assert sidecar['w'] == WINDOW_SIZE and sidecar['n_windows'] == N_WINDOWS
+        assert sidecar['analysis']['settings']['eps'] == EPS
+
+    def test_default_selection_records_everything(self, oa_fresh, tmp_path):
+        import yaml
+        files = oa_fresh.save_results(tmp_path)
+        selection = yaml.safe_load(open(files['sidecar']))['selection']
+        assert selection['states'] == ['g', 'd'] and selection['sensors'] == ['r']
+
+    def test_observability_matrices_npz(self, oa_fresh, tmp_path):
+        files = oa_fresh.save_results(tmp_path, include_observability_matrices=True)
+        with np.load(files['observability_matrices'], allow_pickle=False) as data:
+            assert data['O'].shape == (N_WINDOWS, WINDOW_SIZE, 2)
+            for k, O in enumerate(oa_fresh.O_df_sliding):
+                np.testing.assert_array_equal(data['O'][k], O.values)
+            assert list(data['state_names']) == ['g', 'd']
+            assert list(data['sensor']) == ['r'] * WINDOW_SIZE
+            assert list(data['time_step']) == list(range(WINDOW_SIZE))
+            np.testing.assert_array_equal(data['O_index'], np.arange(N_WINDOWS))
+            np.testing.assert_allclose(data['window_time_initial'], oa_fresh.O_time)
+
+    def test_transformed_matrices_are_saved(self, simulator, trajectory, tmp_path):
+        import yaml
+        oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE, R=0.1, z_function=z_optic_flow,
+                                   z_state_names=['q', 'd']).run()
+        files = oa.save_results(tmp_path, states='q', include_observability_matrices=True)
+        with np.load(files['observability_matrices']) as data:
+            assert list(data['state_names']) == ['q', 'd']
+            np.testing.assert_array_equal(data['O'][0], oa.O_df_sliding[0].values)
+        sidecar = yaml.safe_load(open(files['sidecar']))
+        assert sidecar['transformed_coordinates'] is True
+        assert sidecar['analysis']['references']['z_function'] == 'test_analysis:z_optic_flow'
+
+    def test_does_not_overwrite_by_default(self, oa_fresh, tmp_path):
+        oa_fresh.save_results(tmp_path)
+        with pytest.raises(FileExistsError, match='overwrite=True'):
+            oa_fresh.save_results(tmp_path)
+        oa_fresh.save_results(tmp_path, overwrite=True)
+
+    def test_creates_nested_directory(self, oa_fresh, tmp_path):
+        files = oa_fresh.save_results(tmp_path / 'a' / 'b')
+        assert (tmp_path / 'a' / 'b' / 'min_error_variance.csv').exists()
+        assert files['sidecar'].endswith('min_error_variance.yaml')
+
+    def test_requires_run(self, simulator, trajectory, tmp_path):
+        oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE)
+        with pytest.raises(RuntimeError, match='call run'):
+            oa.save_results(tmp_path)
+        assert not any(tmp_path.iterdir())
+
+    def test_sidecar_settings_reload(self, oa_fresh, simulator, trajectory, tmp_path):
+        files = oa_fresh.save_results(tmp_path)
+        loaded = ObservabilityAnalysis(simulator, *trajectory).load_settings(files['sidecar'])
+        assert loaded.settings == oa_fresh.settings

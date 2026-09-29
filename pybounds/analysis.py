@@ -14,6 +14,7 @@ the class does not change.
 import sys
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Callable, NamedTuple
 
@@ -672,6 +673,81 @@ class ObservabilityAnalysis:
         image = ObservabilityMatrixImage(O, state_names=state_names, sensor_names=sensor_names)
         image.plot(**plot_kwargs)
         return image
+
+    # ------------------------------------------------------------------ saving results
+
+    def save_results(self, directory, states=None, sensors=None, time_steps=None, *, R=_UNSET, lam=_UNSET,
+                     force_R_scalar=False, include_observability_matrices=False, overwrite=False):
+        """Save the minimum error variance for a selection, with a YAML sidecar, into a directory.
+
+        Files written (the directory is created if needed):
+          - min_error_variance.csv: the time series returned by min_error_variance(...)
+          - min_error_variance.yaml: the selection (states, sensors, time_steps, R, lam, force_R_scalar),
+            the full lists of states, sensors and time-steps, and all analysis settings (loadable with
+            load_settings)
+          - observability_matrices.npz (if include_observability_matrices): 'O' with shape
+            (n_windows, w*p, n) plus 'state_names', 'sensor' and 'time_step' labels, 'O_index', and
+            't_sim' / 'window_time_initial' when the trajectory time is known. O is in the transformed
+            coordinates when z_function is set.
+
+        :param bool overwrite: replace existing files instead of raising FileExistsError
+        :return dict: path of each file written, keyed by 'min_error_variance', 'sidecar' and
+            'observability_matrices'
+        """
+        states_l, sensors_l, time_steps_l = self._select(states, sensors, time_steps)
+        R_r, lam_r = self._resolve(R, lam, sensors_l)
+        ev = self.min_error_variance(states_l, sensors_l, time_steps_l, R=R_r, lam=lam_r,
+                                     force_R_scalar=force_R_scalar)
+
+        directory = Path(directory)
+        files = {'min_error_variance': directory / 'min_error_variance.csv',
+                 'sidecar': directory / 'min_error_variance.yaml'}
+        if include_observability_matrices:
+            files['observability_matrices'] = directory / 'observability_matrices.npz'
+        existing = [str(f) for f in files.values() if f.exists()]
+        if existing and not overwrite:
+            raise FileExistsError(f'would overwrite {existing}; pass overwrite=True to replace them')
+        directory.mkdir(parents=True, exist_ok=True)
+
+        ev.to_csv(files['min_error_variance'], index=False)
+        if include_observability_matrices:
+            self._save_observability_matrices(files['observability_matrices'])
+
+        sidecar = {
+            'pybounds_version': _pybounds_version(),
+            'created': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'files': {k: f.name for k, f in files.items() if k != 'sidecar'},
+            'columns': list(ev.columns),
+            'selection': {'states': states_l or self._state_names,
+                          'sensors': sensors_l or self._sensor_names,
+                          'time_steps': time_steps_l or self._time_steps,
+                          'R': _R_to_yaml(R_r), 'lam': lam_r, 'force_R_scalar': bool(force_R_scalar)},
+            'all_states': self._state_names,
+            'all_sensors': self._sensor_names,
+            'all_time_steps': self._time_steps,
+            'transformed_coordinates': self._settings['z_function'] is not None,
+            'w': self._result.w,
+            'n_windows': len(self._O_df_sliding),
+            'time_alignment': 'each window is stamped at its center time-step, time_initial + (w // 2) * dt',
+            'analysis': self._settings_document(),
+        }
+        with open(files['sidecar'], 'w') as f:
+            yaml.safe_dump(_to_plain(sidecar), f, sort_keys=False)
+        return {k: str(f) for k, f in files.items()}
+
+    def _save_observability_matrices(self, path):
+        index = self._O_df_sliding[0].index
+        if any(not O.index.equals(index) or list(O.columns) != self._state_names for O in self._O_df_sliding):
+            raise ValueError('windows have different rows or columns; cannot stack them into one array')
+        arrays = {'O': np.stack([O.to_numpy(dtype=float) for O in self._O_df_sliding]),
+                  'state_names': np.array(self._state_names, dtype=str),
+                  'sensor': np.array(index.get_level_values('sensor'), dtype=str),
+                  'time_step': np.array(index.get_level_values('time_step'), dtype=int),
+                  'O_index': np.asarray(self._result.O_index, dtype=int)}
+        if self._result.t_sim is not None:
+            arrays['t_sim'] = np.asarray(self._result.t_sim, dtype=float)
+            arrays['window_time_initial'] = arrays['t_sim'][arrays['O_index']]
+        np.savez(path, **arrays)
 
     def __repr__(self):
         status = f'computed, {len(self._O_df_sliding)} windows' if self.is_computed else 'not computed'
