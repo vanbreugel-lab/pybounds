@@ -97,6 +97,20 @@ class TestFisherParameterEffects:
         ev_high = FO_high.error_variance.values
         assert np.all(ev_high > ev_low)
 
+    def test_ndarray_O_matches_dataframe(self, eom):
+        """A plain array O should give the same F and error variance as the equivalent data-frame."""
+        FO_df = pybounds.FisherObservability(eom.O_df, R=0.1, lam=1e-8)
+        FO_np = pybounds.FisherObservability(eom.O_df.values, R=0.1, lam=1e-8)
+        assert FO_np.w == eom.O_df.shape[0]
+        assert list(FO_np.F.columns) == ['x_0', 'x_1']
+        assert np.allclose(FO_np.F.values, FO_df.F.values)
+        assert np.allclose(FO_np.error_variance.values, FO_df.error_variance.values)
+
+    def test_ndarray_O_time_step_subset(self, eom):
+        FO = pybounds.FisherObservability(eom.O_df.values, R=0.1, lam=1e-8, time_steps=[0, 1, 2])
+        assert FO.O.shape == (3, 2)
+        assert np.allclose(FO.O.values, eom.O_df.values[0:3])
+
     def test_invalid_O_type_raises(self, eom):
         """Passing a plain list (no .shape) raises AttributeError before the isinstance check."""
         with pytest.raises((TypeError, AttributeError)):

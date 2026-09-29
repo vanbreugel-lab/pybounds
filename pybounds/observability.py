@@ -447,10 +447,11 @@ class FisherObservability:
             self.O = O.copy()
             self.sensor_names = tuple(O.index.get_level_values('sensor'))
             self.state_names = tuple(O.columns)
-        elif isinstance(O, np.ndarray):  # array given
+        elif isinstance(O, np.ndarray):  # array given, treat each row as one time-step of a single sensor 'y'
             self.sensor_names = tuple(['y' for _ in range(self.pw)])
             self.state_names = tuple(['x_' + str(n) for n in range(self.n)])
-            self.O = pd.DataFrame(O, index=self.sensor_names, columns=self.state_names)
+            index = pd.MultiIndex.from_arrays([self.sensor_names, np.arange(self.pw)], names=['sensor', 'time_step'])
+            self.O = pd.DataFrame(O, index=index, columns=self.state_names)
         else:
             raise TypeError('O is not a pandas data-frame or numpy array')
 
@@ -479,7 +480,7 @@ class FisherObservability:
             self.time_steps = np.array(time_steps)
 
         # Get subset of O
-        self.O = O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
+        self.O = self.O.loc[(self.sensors, self.time_steps), self.states].sort_values(['time_step', 'sensor'])
 
         # Reset the size of O
         self.pw = self.O.shape[0]  # number of sensors * time-steps
