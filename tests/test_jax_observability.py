@@ -336,3 +336,58 @@ class TestJaxAux:
         with pytest.raises(ValueError, match='same structure and array shapes'):
             JaxSlidingEmpiricalObservabilityMatrix(
                 jax_sim_aux, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE, aux_list=aux_list)
+
+
+# ---------------------------------------------------------------------------
+# Integration substeps
+# ---------------------------------------------------------------------------
+
+def f_decay(x, u):
+    return jnp.array([-20.0 * x[0] + 0.0 * u[0]])
+
+
+def h_identity(x, u):
+    return jnp.array([x[0]])
+
+
+def _decay_sim(dt, **kwargs):
+    return JaxSimulator(f_decay, h_identity, dt=dt, state_names=['x'], input_names=['u'],
+                        measurement_names=['y'], **kwargs)
+
+
+class TestJaxSubsteps:
+    def test_default_is_one(self, jax_sim):
+        assert jax_sim.substeps == 1
+
+    @pytest.mark.parametrize('substeps', [4, 7])
+    def test_substeps_equals_finer_dt(self, jax_sim, substeps):
+        """substeps=k gives the same samples as a k-times finer dt with each input repeated k times."""
+        coarse = JaxSimulator(f_jax, h_jax, dt=0.05, state_names=STATE_NAMES, input_names=INPUT_NAMES,
+                              measurement_names=MEASUREMENT_NAMES, substeps=substeps)
+        fine = JaxSimulator(f_jax, h_jax, dt=0.05 / substeps, state_names=STATE_NAMES,
+                            input_names=INPUT_NAMES, measurement_names=MEASUREMENT_NAMES)
+        x0 = np.array([2.0, 3.0])
+        u = np.linspace(-0.5, 0.5, 20)[:, None]
+        y_fine = fine.simulate(x0, np.repeat(u, substeps, axis=0))[::substeps]
+        np.testing.assert_allclose(coarse.simulate(x0, u), y_fine, rtol=1e-12)
+
+    def test_substeps_improve_accuracy(self):
+        dt, n = 0.1, 20
+        u = np.zeros((n, 1))
+        y_exact = np.exp(-20.0 * dt * np.arange(n))[:, None]
+        err_1 = np.max(np.abs(_decay_sim(dt).simulate([1.0], u) - y_exact))
+        err_8 = np.max(np.abs(_decay_sim(dt, substeps=8).simulate([1.0], u) - y_exact))
+        assert err_8 < 1e-3 * err_1
+
+    def test_observability_matrix_with_substeps(self):
+        """jacfwd through the substep loop: for this linear system dy_k/dx0 = y_k when x0 = 1,
+        and both approximate exp(-20 k dt)."""
+        dt, n = 0.1, 20
+        eom = JaxEmpiricalObservabilityMatrix(_decay_sim(dt, substeps=8), [1.0], np.zeros((n, 1)))
+        np.testing.assert_allclose(eom.O[:, 0], eom.y_nominal[:, 0], rtol=1e-12)
+        np.testing.assert_allclose(eom.O[:, 0], np.exp(-20.0 * dt * np.arange(n)), atol=1e-4)
+
+    @pytest.mark.parametrize('substeps', [0, -1, 1.5, True, '2'])
+    def test_invalid_substeps_raises(self, substeps):
+        with pytest.raises(ValueError, match='substeps must be a positive integer'):
+            _decay_sim(0.1, substeps=substeps)

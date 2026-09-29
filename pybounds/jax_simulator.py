@@ -64,7 +64,7 @@ class JaxSimulator:
         when auxiliary data is passed.
         Returns a ``jnp`` array of shape ``(p,)``.
     dt : float
-        Integration time step (seconds).
+        Sample time step (seconds): one input and one measurement per ``dt``.
     state_names : list of str
         Names of state variables (length n).
     input_names : list of str
@@ -74,14 +74,24 @@ class JaxSimulator:
     integrator : {'rk4', 'euler'}
         Numerical integration scheme.  ``'rk4'`` is more accurate and
         recommended; ``'euler'`` is faster but first-order.
+    substeps : int
+        Number of integration steps per sample, each of size ``dt / substeps``,
+        with the input held constant over the sample.  The default of 1 takes a
+        single step per ``dt``.  Increase it when ``dt`` is coarse relative to
+        the system's fastest dynamics (including moderately stiff systems);
+        measurements are still returned once per ``dt``.
     """
 
     def __init__(self, f_jax, h_jax, dt,
                  state_names, input_names, measurement_names,
-                 integrator='rk4'):
+                 integrator='rk4', substeps=1):
+        if isinstance(substeps, bool) or not isinstance(substeps, (int, np.integer)) or substeps < 1:
+            raise ValueError(f'substeps must be a positive integer, got {substeps!r}')
+
         self.f_jax = f_jax
         self.h_jax = h_jax
         self.dt = float(dt)
+        self.substeps = int(substeps)
         self.state_names = list(state_names)
         self.input_names = list(input_names)
         self.measurement_names = list(measurement_names)
@@ -101,7 +111,8 @@ class JaxSimulator:
         aux   : None, or any JAX pytree passed to f and h at every time step
         y_traj: shape (w, p)  — measurement at every time step
         """
-        dt = self.dt
+        substeps = self.substeps
+        dt = self.dt / substeps  # integration step
         f = self.f_jax
         h = self.h_jax
         integrator = self.integrator
@@ -136,7 +147,10 @@ class JaxSimulator:
 
             def scan_fn(x, u):
                 y = jnp.asarray(h_xu(x, u))
-                x_next = step_fn(f_xu, x, u)
+                if substeps == 1:
+                    x_next = step_fn(f_xu, x, u)
+                else:
+                    x_next = jax.lax.fori_loop(0, substeps, lambda _, x_k: step_fn(f_xu, x_k, u), x)
                 return x_next, y
 
             x0_arr = jnp.asarray(x0, dtype=jnp.float64)
