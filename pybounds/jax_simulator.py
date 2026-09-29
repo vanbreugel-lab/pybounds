@@ -57,9 +57,11 @@ class JaxSimulator:
     f_jax : callable
         Dynamics function ``f_jax(x, u) -> x_dot``.
         ``x`` and ``u`` are 1-D ``jnp`` arrays; return value must also be a
-        ``jnp`` array of shape ``(n,)``.
+        ``jnp`` array of shape ``(n,)``.  When auxiliary data is passed
+        (``aux`` / ``aux_list``), it is called as ``f_jax(x, u, aux)``.
     h_jax : callable
-        Measurement function ``h_jax(x, u) -> y``.
+        Measurement function ``h_jax(x, u) -> y``, or ``h_jax(x, u, aux)``
+        when auxiliary data is passed.
         Returns a ``jnp`` array of shape ``(p,)``.
     dt : float
         Integration time step (seconds).
@@ -92,10 +94,11 @@ class JaxSimulator:
         self._simulate_jax = self._build_simulate()
 
     def _build_simulate(self):
-        """Return a pure JAX function  simulate(x0, u_seq) -> y_traj.
+        """Return a pure JAX function  simulate(x0, u_seq, aux=None) -> y_traj.
 
         x0    : shape (n,)
         u_seq : shape (w, m)  — one input vector per time step
+        aux   : None, or any JAX pytree passed to f and h at every time step
         y_traj: shape (w, p)  — measurement at every time step
         """
         dt = self.dt
@@ -103,27 +106,37 @@ class JaxSimulator:
         h = self.h_jax
         integrator = self.integrator
 
-        def euler_step(x, u):
-            return x + dt * jnp.asarray(f(x, u))
+        def euler_step(f_xu, x, u):
+            return x + dt * jnp.asarray(f_xu(x, u))
 
-        def rk4_step(x, u):
-            k1 = jnp.asarray(f(x,              u))
-            k2 = jnp.asarray(f(x + dt / 2 * k1, u))
-            k3 = jnp.asarray(f(x + dt / 2 * k2, u))
-            k4 = jnp.asarray(f(x + dt * k3,      u))
+        def rk4_step(f_xu, x, u):
+            k1 = jnp.asarray(f_xu(x,              u))
+            k2 = jnp.asarray(f_xu(x + dt / 2 * k1, u))
+            k3 = jnp.asarray(f_xu(x + dt / 2 * k2, u))
+            k4 = jnp.asarray(f_xu(x + dt * k3,      u))
             return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
 
         step_fn = rk4_step if integrator == 'rk4' else euler_step
 
-        def simulate(x0, u_seq):
+        def simulate(x0, u_seq, aux=None):
             """Integrate forward and return measurement trajectory.
 
             Measurement at step k is evaluated *before* integrating step k,
             matching the convention used by ``Simulator.simulate()``.
             """
+            # With aux, f and h are called as f(x, u, aux) and h(x, u, aux)
+            if aux is None:
+                f_xu, h_xu = f, h
+            else:
+                def f_xu(x, u):
+                    return f(x, u, aux)
+
+                def h_xu(x, u):
+                    return h(x, u, aux)
+
             def scan_fn(x, u):
-                y = jnp.asarray(h(x, u))
-                x_next = step_fn(x, u)
+                y = jnp.asarray(h_xu(x, u))
+                x_next = step_fn(f_xu, x, u)
                 return x_next, y
 
             x0_arr = jnp.asarray(x0, dtype=jnp.float64)
@@ -133,7 +146,7 @@ class JaxSimulator:
 
         return simulate
 
-    def simulate(self, x0, u_seq):
+    def simulate(self, x0, u_seq, aux=None):
         """Run the open-loop simulation.
 
         Parameters
@@ -143,6 +156,10 @@ class JaxSimulator:
         u_seq : array-like or dict
             Input sequence, shape ``(w, m)`` or dict mapping input name →
             array of length ``w``.
+        aux : optional
+            Auxiliary data (scalar, array, or dict/tuple of arrays) passed
+            unchanged to ``f_jax(x, u, aux)`` and ``h_jax(x, u, aux)`` at every
+            time step.  If None, ``f_jax(x, u)`` and ``h_jax(x, u)`` are called.
 
         Returns
         -------
@@ -151,7 +168,7 @@ class JaxSimulator:
         """
         x0_arr = _to_array(x0, self.state_names)
         u_arr = _to_u_array(u_seq, self.input_names)
-        y = self._simulate_jax(x0_arr, u_arr)
+        y = self._simulate_jax(x0_arr, u_arr, _to_aux(aux))
         return np.array(y)
 
 
@@ -179,6 +196,10 @@ class JaxEmpiricalObservabilityMatrix:
         Input sequence, shape ``(w, m)`` or dict.
     eps : float, optional
         Accepted for API compatibility but not used (the Jacobian is exact).
+    aux : optional
+        Auxiliary data passed to ``f_jax(x, u, aux)`` and ``h_jax(x, u, aux)``
+        (see ``JaxSimulator.simulate``).  The Jacobian is taken with respect
+        to x₀ only.
     z_function : callable, optional
         Transforms coordinates from original to new states, ``z = z_function(x)``,
         using sympy functions.  Same as ``EmpiricalObservabilityMatrix``;
@@ -187,16 +208,18 @@ class JaxEmpiricalObservabilityMatrix:
         Names of the states in the new coordinates.
     """
 
-    def __init__(self, jax_simulator, x0, u_seq, eps=None,
+    def __init__(self, jax_simulator, x0, u_seq, eps=None, aux=None,
                  z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator
         self.eps = eps  # kept for API compat; not used
 
         x0_arr = _to_array(x0, jax_simulator.state_names)
         u_arr = _to_u_array(u_seq, jax_simulator.input_names)
+        aux_arr = _to_aux(aux)
 
         self.x0 = x0_arr
         self.u = u_arr
+        self.aux = aux
         self.n = jax_simulator.n
         self.p = jax_simulator.p
         self.w = u_arr.shape[0]
@@ -204,11 +227,11 @@ class JaxEmpiricalObservabilityMatrix:
         self.measurement_names = jax_simulator.measurement_names
 
         # Nominal trajectory
-        self.y_nominal = np.array(jax_simulator._simulate_jax(x0_arr, u_arr))  # (w, p)
+        self.y_nominal = np.array(jax_simulator._simulate_jax(x0_arr, u_arr, aux_arr))  # (w, p)
 
         # Jacobian: dY/dx0, shape (w, p, n)
         jac_fn = jax.jit(jax.jacfwd(jax_simulator._simulate_jax, argnums=0))
-        jac = np.array(jac_fn(x0_arr, u_arr))   # (w, p, n)
+        jac = np.array(jac_fn(x0_arr, u_arr, aux_arr))   # (w, p, n)
 
         # Reshape to (w*p, n) matching EmpiricalObservabilityMatrix.O
         # Row order: [sensor_0 t=0, sensor_1 t=0, ..., sensor_p t=0,
@@ -271,6 +294,12 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         Input trajectory.
     w : int
         Window size in time steps.
+    aux_list : list, optional
+        Auxiliary data, one entry per time step of the trajectory (length T),
+        as in ``SlidingEmpiricalObservabilityMatrix``.  Window i passes
+        ``aux_list[i]`` to ``f_jax(x, u, aux)`` and ``h_jax(x, u, aux)``.
+        Entries may be scalars, arrays, or dicts/tuples of arrays, but they must
+        all have the same structure and shapes so they can be batched with vmap.
     z_function : callable, optional
         Transforms coordinates from original to new states, ``z = z_function(x)``,
         using sympy functions.  Each window's O is transformed at that window's
@@ -279,7 +308,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         Names of the states in the new coordinates.
     """
 
-    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w,
+    def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w, aux_list=None,
                  z_function=None, z_state_names=None):
         self.jax_simulator = jax_simulator
         self.w = w
@@ -326,16 +355,32 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         u_batch = jnp.array(
             np.stack([u_arr[i:i + w] for i in self.O_index]), dtype=jnp.float64)
 
+        # Batch aux over windows: window i uses aux_list[i], as in SlidingEmpiricalObservabilityMatrix
+        self.aux_list = aux_list
+        if aux_list is None:
+            aux_batch, aux_axis = None, None
+        else:
+            if len(aux_list) != N:
+                raise ValueError('aux_list must have same number of elements as t_sim')
+            try:
+                aux_batch = jax.tree_util.tree_map(
+                    lambda *leaves: jnp.stack(leaves),
+                    *[_to_aux(aux_list[i]) for i in range(n_windows)])
+            except (ValueError, TypeError) as e:
+                raise ValueError('aux_list entries must all have the same structure and array shapes '
+                                 'so they can be batched across windows') from e
+            aux_axis = 0
+
         sim = jax_simulator._simulate_jax
 
         # Single vmapped jacfwd call — one XLA kernel for all windows
         vmapped_jac = jax.jit(
-            jax.vmap(jax.jacfwd(sim, argnums=0), in_axes=(0, 0)))
-        jac_batch = np.array(vmapped_jac(x0_batch, u_batch))  # (n_windows, w, p, n)
+            jax.vmap(jax.jacfwd(sim, argnums=0), in_axes=(0, 0, aux_axis)))
+        jac_batch = np.array(vmapped_jac(x0_batch, u_batch, aux_batch))  # (n_windows, w, p, n)
 
         # Nominal trajectories for all windows
-        vmapped_sim = jax.jit(jax.vmap(sim, in_axes=(0, 0)))
-        y_batch = np.array(vmapped_sim(x0_batch, u_batch))    # (n_windows, w, p)
+        vmapped_sim = jax.jit(jax.vmap(sim, in_axes=(0, 0, aux_axis)))
+        y_batch = np.array(vmapped_sim(x0_batch, u_batch, aux_batch))    # (n_windows, w, p)
 
         # Build O_df_sliding list (same format as SlidingEmpiricalObservabilityMatrix)
         measurement_labels = self.measurement_names * w
@@ -400,6 +445,13 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names):
         O_df_z.append(O_z)
 
     return O_df_z
+
+
+def _to_aux(aux):
+    """Convert aux (None, scalar, array, or pytree of those) to jnp leaves."""
+    if aux is None:
+        return None
+    return jax.tree_util.tree_map(jnp.asarray, aux)
 
 
 def _to_array(x, names):

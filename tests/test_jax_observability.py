@@ -252,3 +252,87 @@ class TestJaxZFunction:
         assert jax_seom_z.state_names == Z_STATE_NAMES
         for O_jax, O_leg in zip(jax_seom_z.O_sliding, seom_z.O_sliding):
             np.testing.assert_allclose(O_jax, O_leg, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Auxiliary inputs (aux / aux_list)
+# ---------------------------------------------------------------------------
+
+def f_jax_aux(x, u, aux):
+    """Mono-camera dynamics with the input scaled by an auxiliary gain."""
+    return jnp.array([aux['gain'] * u[0], 0.0 * u[0]])
+
+
+def h_jax_aux(x, u, aux):
+    return jnp.array([x[0] / x[1] + aux['offset']])
+
+
+class AnalyticAuxSimulator:
+    """Closed-form counterpart of f_jax_aux / h_jax_aux for the CasADi-side classes."""
+
+    def simulate(self, x0, u, aux=None):
+        g0, d0 = x0
+        g = g0 + DT * aux['gain'] * np.concatenate([[0.0], np.cumsum(np.ravel(u))[:-1]])
+        return (g / d0 + aux['offset'])[:, None]
+
+
+@pytest.fixture(scope='module')
+def jax_sim_aux():
+    return JaxSimulator(f_jax_aux, h_jax_aux, dt=DT,
+                        state_names=STATE_NAMES,
+                        input_names=INPUT_NAMES,
+                        measurement_names=MEASUREMENT_NAMES)
+
+
+def _aux_list(n):
+    return [{'gain': g, 'offset': 0.1 * g} for g in np.linspace(0.5, 2.0, n)]
+
+
+class TestJaxAux:
+    def test_simulate_aux_scales_input(self, jax_sim, jax_sim_aux):
+        x0 = np.array([2.0, 3.0])
+        u = 0.1 * np.ones((N_STEPS, 1))
+        y_aux = jax_sim_aux.simulate(x0, u, aux={'gain': 2.0, 'offset': 0.0})
+        np.testing.assert_allclose(y_aux, jax_sim.simulate(x0, 2.0 * u))
+
+    def test_eom_aux_matches_scaled_input(self, jax_sim, jax_sim_aux):
+        x0 = np.array([2.0, 3.0])
+        u = 0.1 * np.ones((N_STEPS, 1))
+        eom_aux = JaxEmpiricalObservabilityMatrix(jax_sim_aux, x0, u, aux={'gain': 2.0, 'offset': 0.5})
+        eom_ref = JaxEmpiricalObservabilityMatrix(jax_sim, x0, 2.0 * u)
+        np.testing.assert_allclose(eom_aux.O, eom_ref.O)
+        np.testing.assert_allclose(eom_aux.y_nominal, eom_ref.y_nominal + 0.5)
+
+    def test_sliding_window_i_uses_aux_list_i(self, jax_sim_aux, seom):
+        aux_list = _aux_list(N_STEPS_SLIDING)
+        jax_seom_aux = JaxSlidingEmpiricalObservabilityMatrix(
+            jax_sim_aux, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE, aux_list=aux_list)
+        for i in (0, N_WINDOWS - 1):
+            k = jax_seom_aux.O_index[i]
+            eom_i = JaxEmpiricalObservabilityMatrix(
+                jax_sim_aux, seom.x_sim[k], seom.u_sim[k:k + WINDOW_SIZE], aux=aux_list[i])
+            np.testing.assert_allclose(jax_seom_aux.O_sliding[i], eom_i.O)
+            np.testing.assert_allclose(jax_seom_aux.window_data['y'][i], eom_i.y_nominal)
+
+    def test_sliding_aux_matches_legacy(self, jax_sim_aux, seom):
+        aux_list = _aux_list(N_STEPS_SLIDING)
+        jax_seom_aux = JaxSlidingEmpiricalObservabilityMatrix(
+            jax_sim_aux, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE, aux_list=aux_list)
+        seom_aux = pybounds.SlidingEmpiricalObservabilityMatrix(
+            AnalyticAuxSimulator(), seom.t_sim, seom.x_sim, seom.u_sim,
+            w=WINDOW_SIZE, eps=EPS, aux_list=aux_list)
+        for O_jax, O_leg in zip(jax_seom_aux.O_sliding, seom_aux.O_sliding):
+            np.testing.assert_allclose(O_jax, O_leg, atol=1e-3)
+
+    def test_sliding_aux_list_wrong_length_raises(self, jax_sim_aux, seom):
+        with pytest.raises(ValueError, match='aux_list must have same number of elements'):
+            JaxSlidingEmpiricalObservabilityMatrix(
+                jax_sim_aux, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE,
+                aux_list=_aux_list(N_STEPS_SLIDING - 1))
+
+    def test_sliding_aux_list_mismatched_shapes_raises(self, jax_sim_aux, seom):
+        aux_list = _aux_list(N_STEPS_SLIDING)
+        aux_list[1] = {'gain': np.ones(2), 'offset': 0.0}
+        with pytest.raises(ValueError, match='same structure and array shapes'):
+            JaxSlidingEmpiricalObservabilityMatrix(
+                jax_sim_aux, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE, aux_list=aux_list)
