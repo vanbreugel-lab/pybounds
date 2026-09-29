@@ -59,3 +59,9 @@ No linter is configured. Functionality is also demonstrated through Jupyter note
 ### Dependencies
 
 do_mpc and CasADi are central — CasADi provides symbolic math and solvers; do_mpc wraps model definition and simulation. NumPy/SciPy/Pandas handle numerical operations and data; SymPy is used only in `SymbolicJacobian`. JAX is optional.
+
+## Possible future work
+
+Ideas discussed but deliberately not implemented yet. Don't build these unless asked.
+
+- **Stability warning for the JAX integrator.** `JaxSimulator` uses fixed-step RK4 (or Euler) with step `dt / substeps`. On stiff systems a too-large step makes RK4 diverge, but the values usually stay finite at typical window lengths (e.g. max |O| ≈ 4e21 at w=20 for a 500/s relaxation at dt=0.01), so the existing NaN/inf warning doesn't fire. A possible check: at each window's initial state, compute the eigenvalues of ∂f/∂x (one vmapped `jax.jacfwd(f)` call) and warn when max|λ| · dt/substeps exceeds the stability limit (≈2.8 for RK4, 2 for Euler), suggesting the number of substeps needed. It is a heuristic, since it only linearizes at each window's start.
