@@ -269,7 +269,7 @@ class Simulator(object):
                 # Normalize unset keys to be the length of the set keys be repeating the 1st element
                 unset_key = set(update.keys()) - set(data.keys())  # find keys that were not set
                 set_key = set(data.keys())  # find keys that were set
-                if unset_key != set_key:
+                if unset_key and set_key:  # some keys set, others not
                     w = data[list(set_key)[0]].shape[0]  # size of 1st set key
                     for k in unset_key:  # update each unset key
                         update[k] = update[k][0] * np.ones(w)

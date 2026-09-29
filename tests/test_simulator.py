@@ -230,3 +230,12 @@ class TestListInputs:
         y_list = simulator.simulate(x0={'g': 2.0, 'd': 3.0}, u=u)
         y_array = simulator.simulate(x0={'g': 2.0, 'd': 3.0}, u={'u': 0.1 * np.ones(10)})
         np.testing.assert_allclose(y_list, y_array)
+
+
+class TestEmptyDictUpdate:
+
+    def test_empty_dict_leaves_values_unchanged(self, simulator):
+        simulator.simulate(x0={'g': 2.0, 'd': 3.0}, u={'u': 0.1 * np.ones(10)})
+        before = simulator.u['u'].copy()
+        simulator.update_dict({}, name='u')
+        np.testing.assert_array_equal(simulator.u['u'], before)
