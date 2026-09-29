@@ -59,36 +59,44 @@ t, x, u, _ = sim.simulate(x0={'g': 2.0, 'd': 3.0},
                            u={'u': 0.1 * np.ones(500)},
                            return_full_output=True)
 
-# 3. Compute sliding-window observability and Fisher information
-ev = pybounds.compute_observability(sim, t, x, u, R={'r': 0.1})
+# 3. Set up the observability analysis (nothing is computed yet), then run it
+oa = pybounds.ObservabilityAnalysis(sim, t, x, u, w=6, R={'r': 0.1})
+oa.run()
 
 # 4. Plot minimum error variance over time for each state
+ev = oa.min_error_variance()
 ev.set_index('time')[['g', 'd']].plot(logy=True, ylabel='Min. error variance')
 plt.show()
 ```
 
-The Fisher information matrix F is inverted as (F + λI)⁻¹, with λ set by the `lam` argument (default `1e-8`). 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
+- **Window:** `w` is the sliding-window length in time-steps. Without it, the whole trajectory is analyzed as one window.
+- **Noise:** `R` is the measurement noise variance, per sensor.
+- **Regularization:** the Fisher information matrix F is inverted as (F + λI)⁻¹, with λ set by the `lam` argument (default `1e-8`). 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
+- **One-call shortcut:** `pybounds.compute_observability(sim, t, x, u, R={'r': 0.1}, w=6)` returns the same result as steps 3 and 4 in a single call, without keeping the analysis.
 
-### Keeping the analysis: `ObservabilityAnalysis`
+### Selecting states, and saving settings and results
 
-`compute_observability` returns one result and discards the observability matrices. `ObservabilityAnalysis` keeps them, so you can ask for several selections of states, sensors and time-steps without recomputing anything. It is configured first and computes only when you call `run()`.
+`oa` keeps the observability matrices from `run()`, so you can ask about different selections without recomputing them:
 
 ```python
-# Configure (nothing is computed yet), then run
-oa = pybounds.ObservabilityAnalysis(sim, t, x, u, w=6, R={'r': 0.1}, eps=1e-4)
-oa.run()
+# Drop a state: treat d as known and ask how well g alone can be estimated
+ev_g = oa.min_error_variance(states=['g'])
 
-ev_all = oa.min_error_variance()                    # all states, sensors and time-steps
-ev_d = oa.min_error_variance(states=['d'])          # d only, with g treated as known
-ev_short = oa.min_error_variance(time_steps=[0, 1, 2], lam=1e-6)
+# Other selections and parameters work the same way
+ev_short = oa.min_error_variance(time_steps=[0, 1, 2])   # only the first 3 steps of each window
+ev_noisy = oa.min_error_variance(R={'r': 1.0})           # a different noise level
 
-# Save settings, and results for a selection (CSV + YAML sidecar, optionally all O's as .npz)
+# Save every setting to YAML, and load it into another analysis later
 oa.save_settings('observability_settings.yaml')
-oa.save_results('results_d', states=['d'], include_observability_matrices=True)
+oa2 = pybounds.ObservabilityAnalysis(sim, t, x, u).load_settings('observability_settings.yaml')
+
+# Save results for a selection into a directory: min_error_variance.csv, a YAML sidecar
+# (selection, full state/sensor lists, settings) and, optionally, all observability matrices (.npz)
+oa.save_results('results_g', states=['g'], include_observability_matrices=True)
 ```
 
-- **Settings:** `update_settings(...)` changes settings before or after `run()`. Changing anything that affects the observability matrices (e.g. `w`, `eps`, `z_function`) discards the results until you call `run()` again; changing `R` or `lam` does not. `load_settings(path)` applies settings saved with `save_settings`.
-- **Selecting states is conditional:** the states you leave out are treated as known.
+- **Dropping a state is conditional:** the states you leave out are treated as known, so the remaining ones usually look more observable than when every state is estimated together.
+- **Changing settings:** `update_settings(...)` changes settings before or after `run()`. Changing anything that affects the observability matrices (e.g. `w`, `eps`, `z_function`) discards the results until you call `run()` again; changing `R` or `lam` does not.
 - **Backends:** `method` picks how the observability matrices are built: `'empirical'` (finite differences) or `'jax'` (autodiff). It is chosen automatically from the simulator type.
 
 ## Notebook examples
