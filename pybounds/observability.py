@@ -680,7 +680,7 @@ class FisherObservability:
 
 class SlidingFisherObservability:
     def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
-                 states=None, sensors=None, time_steps=None, w=None):
+                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
 
@@ -699,6 +699,7 @@ class SlidingFisherObservability:
         :param None | tuple | list | np.array time_steps: array of time steps to use from O's, ex: np.array([0, 1, 2])
         :param None | tuple | list | np.array w: window size to use from O's,
             if None then just grab it from O as the maximum window size
+        :param bool force_R_scalar: force R to be a scalar in each window (see FisherObservability)
         """
 
         self.O_list = O_list
@@ -727,7 +728,8 @@ class SlidingFisherObservability:
             O = self.O_list[k]
 
             # Compute Fisher information & inverse
-            FO = FisherObservability(O, R=R, lam=lam, states=states, sensors=sensors, time_steps=time_steps, w=w)
+            FO = FisherObservability(O, R=R, lam=lam, force_R_scalar=force_R_scalar,
+                                     states=states, sensors=sensors, time_steps=time_steps, w=w)
             self.FO.append(FO)
 
             # Collect error variance data
@@ -806,6 +808,31 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
                 O_z.index = z_state_names
 
     return O_z, dxdz, dzdx_sym
+
+
+def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_dxdz=False):
+    """Apply ``transform_states`` to each O data-frame at its own x0.
+
+    Gives the same result as calling ``transform_states`` per window, but
+    builds (and simplifies) the symbolic Jacobian only once. With return_dxdz=True,
+    also returns the list of numerical dx/dz Jacobians (one per window).
+    """
+    x_sym = sp.symbols('x_0:%d' % O_df_list[0].shape[1])
+    dzdx_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+
+    O_df_z = []
+    dxdz_list = []
+    for O_df, x0 in zip(O_df_list, x0_list):
+        dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
+        O_z = O_df @ dxdz
+        if z_state_names is not None:
+            O_z.columns = z_state_names
+        O_df_z.append(O_z)
+        dxdz_list.append(dxdz)
+
+    if return_dxdz:
+        return O_df_z, dxdz_list
+    return O_df_z
 
 
 class ObservabilityMatrixImage:
@@ -987,27 +1014,14 @@ def compute_observability(simulator, t_sim, x_sim, u_sim, R,
     -------
     DataFrame with columns 'time', 'time_initial', and one column per state
     containing the minimum error variance for each sliding window.
+
+    See ``ObservabilityAnalysis`` to keep the observability matrices and query
+    other selections of states, sensors and time-steps without recomputing them.
     """
-    if use_jax:
-        try:
-            from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
-        except ImportError:
-            raise ImportError(
-                "JAX is not installed. Install it with: pip install jax[cpu]"
-            )
-        seom = JaxSlidingEmpiricalObservabilityMatrix(
-            simulator, t_sim, x_sim, u_sim, w=w)
-    else:
-        seom = SlidingEmpiricalObservabilityMatrix(
-            simulator, t_sim, x_sim, u_sim, w=w, eps=eps)
-    sfo = SlidingFisherObservability(
-        seom.O_df_sliding,
-        time=seom.t_sim,
-        R=R,
-        lam=lam,
-        states=simulator.state_names,
-        sensors=simulator.measurement_names,
-        time_steps=np.arange(w),
-        w=None,
-    )
-    return sfo.get_minimum_error_variance()
+    from .analysis import ObservabilityAnalysis   # imported here: analysis imports this module
+
+    method_options = {} if use_jax else {'eps': eps}   # eps does not apply to the JAX backend
+    analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='jax' if use_jax else 'empirical',
+                                     w=w, R=R, lam=lam, **method_options)
+    return analysis.run().min_error_variance(states=simulator.state_names, sensors=simulator.measurement_names,
+                                             time_steps=None if w is None else np.arange(w))

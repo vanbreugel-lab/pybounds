@@ -27,6 +27,7 @@ dependencies = [
     "scipy>=1.7.0",
     "sympy>=1.9",
     "casadi",
+    "pyyaml>=5.1",
 ]
 
 [project.urls]

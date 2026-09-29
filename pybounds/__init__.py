@@ -9,6 +9,8 @@ from .observability import ObservabilityMatrixImage
 from .observability import transform_states
 from .observability import compute_observability
 
+from .analysis import ObservabilityAnalysis
+
 from .jacobian import SymbolicJacobian
 
 from .util import colorline, plot_heatmap_log_timeseries
@@ -28,6 +30,7 @@ __all__ = [
     'ObservabilityMatrixImage',
     'transform_states',
     'compute_observability',
+    'ObservabilityAnalysis',
     'SymbolicJacobian',
     'colorline',
     'plot_heatmap_log_timeseries',
