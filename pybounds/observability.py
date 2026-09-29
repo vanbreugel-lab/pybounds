@@ -891,8 +891,8 @@ class ObservabilityMatrixImage:
         else:
             self.crange = vmax_override
 
-        # Display O
-        O_disp = self.O.values
+        # Display O (a copy: clipping must not modify self.O, and .values is read-only under pandas copy-on-write)
+        O_disp = self.O.to_numpy(dtype=float, copy=True)
         # O_disp = np.nan_to_num(np.sign(O_disp) * np.log(np.abs(O_disp)), nan=0.0)
         for n in range(self.n):
             for m in range(self.pw):

@@ -90,3 +90,16 @@ class TestObservabilityMatrixImageLabels:
         OI.plot()
         OI.fig.canvas.draw()   # mathtext labels are only parsed when drawn
         plt.close(OI.fig)
+
+
+class TestObservabilityMatrixImageClipping:
+
+    def test_vmin_ratio_does_not_modify_O(self, seom):
+        O = seom.O_df_sliding[0]
+        OI = pybounds.ObservabilityMatrixImage(O)
+        before = OI.O.values.copy()
+        OI.plot(vmin_ratio=0.9)
+        OI.fig.canvas.draw()
+        plt.close(OI.fig)
+        np.testing.assert_array_equal(OI.O.values, before)
+        np.testing.assert_array_equal(O.values, before)
