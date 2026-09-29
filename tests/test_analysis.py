@@ -410,7 +410,13 @@ def test_works_without_jax():
             "except ImportError as e:\n"
             "    assert 'pip install jax' in str(e)\n"
             "else:\n"
-            "    raise AssertionError('expected ImportError')\n")
+            "    raise AssertionError('expected ImportError')\n"
+            "try:\n"
+            "    pybounds.compute_observability(sim, t, x, u, R=0.1, w=4, use_jax=True)\n"
+            "except ImportError as e:\n"
+            "    assert 'pip install jax' in str(e)\n"
+            "else:\n"
+            "    raise AssertionError('expected ImportError from compute_observability')\n")
     out = subprocess.run([sys.executable, '-W', 'ignore', '-c', code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
 

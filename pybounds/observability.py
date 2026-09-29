@@ -1014,27 +1014,14 @@ def compute_observability(simulator, t_sim, x_sim, u_sim, R,
     -------
     DataFrame with columns 'time', 'time_initial', and one column per state
     containing the minimum error variance for each sliding window.
+
+    See ``ObservabilityAnalysis`` to keep the observability matrices and query
+    other selections of states, sensors and time-steps without recomputing them.
     """
-    if use_jax:
-        try:
-            from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
-        except ImportError:
-            raise ImportError(
-                "JAX is not installed. Install it with: pip install jax[cpu]"
-            )
-        seom = JaxSlidingEmpiricalObservabilityMatrix(
-            simulator, t_sim, x_sim, u_sim, w=w)
-    else:
-        seom = SlidingEmpiricalObservabilityMatrix(
-            simulator, t_sim, x_sim, u_sim, w=w, eps=eps)
-    sfo = SlidingFisherObservability(
-        seom.O_df_sliding,
-        time=seom.t_sim,
-        R=R,
-        lam=lam,
-        states=simulator.state_names,
-        sensors=simulator.measurement_names,
-        time_steps=np.arange(w),
-        w=None,
-    )
-    return sfo.get_minimum_error_variance()
+    from .analysis import ObservabilityAnalysis   # imported here: analysis imports this module
+
+    method_options = {} if use_jax else {'eps': eps}   # eps does not apply to the JAX backend
+    analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='jax' if use_jax else 'empirical',
+                                     w=w, R=R, lam=lam, **method_options)
+    return analysis.run().min_error_variance(states=simulator.state_names, sensors=simulator.measurement_names,
+                                             time_steps=None if w is None else np.arange(w))
