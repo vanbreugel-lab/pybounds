@@ -810,6 +810,26 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
     return O_z, dxdz, dzdx_sym
 
 
+def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names):
+    """Apply ``transform_states`` to each O data-frame at its own x0.
+
+    Gives the same result as calling ``transform_states`` per window, but
+    builds (and simplifies) the symbolic Jacobian only once.
+    """
+    x_sym = sp.symbols('x_0:%d' % O_df_list[0].shape[1])
+    dzdx_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+
+    O_df_z = []
+    for O_df, x0 in zip(O_df_list, x0_list):
+        dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
+        O_z = O_df @ dxdz
+        if z_state_names is not None:
+            O_z.columns = z_state_names
+        O_df_z.append(O_z)
+
+    return O_df_z
+
+
 class ObservabilityMatrixImage:
     def __init__(self, O, state_names=None, sensor_names=None, vmax_percentile=100, vmin_ratio=1.0, cmap='bwr'):
         """ Display an image of an observability matrix.
