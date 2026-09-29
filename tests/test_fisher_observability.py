@@ -179,3 +179,15 @@ class TestFisherMatrixR:
     def test_wrong_size_R_array_raises(self):
         with pytest.raises(ValueError, match='R array must be'):
             pybounds.FisherObservability(_two_sensor_O(), R=np.eye(4))
+
+
+class TestFisherSingleRow:
+
+    @pytest.mark.parametrize('R', [{'r': 0.2, 'a': 100.0}, 0.2])
+    def test_single_selected_row(self, R):
+        """Selecting one sensor at one time-step leaves a 1x1 R, which used to break the F matmul."""
+        O = _two_sensor_O()
+        FO = pybounds.FisherObservability(O, R=R, sensors=['r'], time_steps=[2])
+        assert FO.R.shape == (1, 1)
+        row = O.loc[[('r', 2)]].values
+        np.testing.assert_allclose(FO.F.values, row.T @ row / 0.2)

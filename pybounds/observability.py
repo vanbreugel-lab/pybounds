@@ -590,7 +590,7 @@ class FisherObservability:
             self.set_noise_covariance(R=R)
 
             # Calculate Fisher Information Matrix for non-scalar R
-            self.F = self.O.values.T @ self.R_inv.values.squeeze() @ self.O.values
+            self.F = self.O.values.T @ self.R_inv.values @ self.O.values
 
         self.F = pd.DataFrame(self.F, index=self.O.columns, columns=self.O.columns)
 
