@@ -183,3 +183,16 @@ class TestJaxSlidingEmpiricalObservabilityMatrix:
     def test_O_index(self, jax_seom):
         expected = np.arange(0, N_STEPS_SLIDING - WINDOW_SIZE + 1)
         np.testing.assert_array_equal(jax_seom.O_index, expected)
+
+    def test_window_data_keys(self, jax_seom):
+        assert set(jax_seom.window_data) == {'t', 'u', 'y'}
+        for k in ('t', 'u', 'y'):
+            assert len(jax_seom.window_data[k]) == N_WINDOWS
+
+    def test_window_data_matches_legacy(self, jax_seom, seom):
+        for k in ('t', 'u'):
+            for a, b in zip(jax_seom.window_data[k], seom.window_data[k]):
+                np.testing.assert_array_equal(a, b)
+        for a, b in zip(jax_seom.window_data['y'], seom.window_data['y']):
+            assert a.shape == (WINDOW_SIZE, 1)
+            np.testing.assert_allclose(a, b, atol=1e-6)

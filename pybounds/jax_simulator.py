@@ -229,7 +229,11 @@ class JaxSlidingEmpiricalObservabilityMatrix:
     giving exact Jacobians for every window in one XLA kernel launch.
 
     Output attributes match those of ``SlidingEmpiricalObservabilityMatrix``
-    (``O_sliding``, ``O_df_sliding``, ``O_time``, ``O_index``, ``t_sim``).
+    (``O_sliding``, ``O_df_sliding``, ``O_time``, ``O_index``, ``t_sim``,
+    ``window_data``).  ``window_data`` holds per-window lists under ``'t'``,
+    ``'u'`` and ``'y'`` (nominal measurements); it has no ``'y_plus'`` /
+    ``'y_minus'`` keys because the Jacobian is exact and no perturbed
+    simulations are run.
 
     Parameters
     ----------
@@ -310,10 +314,19 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         self.O_df_sliding = []
         self.y_nominal_sliding = []
 
+        # Per-window trajectory data, matching SlidingEmpiricalObservabilityMatrix.window_data.
+        # There are no 'y_plus' / 'y_minus' keys because no perturbed simulations are run.
+        self.window_data = {'t': [], 'u': [], 'y': []}
+
         for i in range(n_windows):
             O_i = jac_batch[i].reshape(w * self.p, self.n)
             self.O_sliding.append(O_i)
             self.y_nominal_sliding.append(y_batch[i])
+
+            win = np.arange(self.O_index[i], self.O_index[i] + w)
+            self.window_data['t'].append(self.t_sim[win].copy())
+            self.window_data['u'].append(u_arr[win].copy())
+            self.window_data['y'].append(y_batch[i].copy())
 
             O_df_i = pd.DataFrame(O_i, columns=self.state_names,
                                   index=measurement_labels)
