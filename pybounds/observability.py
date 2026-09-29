@@ -700,7 +700,7 @@ class SlidingFisherObservability:
 
         # Set time-step
         if time is not None:
-            if self.n_window > 1:  # compute time-step from vector
+            if len(self.time) > 1:  # compute time-step from vector
                 self.dt = np.mean(np.diff(self.time))
             else:
                 self.dt = 0.0
@@ -729,12 +729,13 @@ class SlidingFisherObservability:
         self.shift_index = int(FO.w) // 2
         self.shift_time = self.shift_index * self.dt
         self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
-        if self.n_window > 1:  # more than 1 window
+        if self.n_window > 1 or time is not None:  # align windows with the time vector
             self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
             time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
             self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
-        else:
+        else:  # single window without a time vector: time in units of time-steps
             self.EV_aligned = self.EV.copy()
+            self.EV_aligned.insert(0, 'time', self.EV['time_initial'] + self.shift_time)
 
     def get_minimum_error_variance(self):
         return self.EV_aligned.copy()

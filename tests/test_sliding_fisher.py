@@ -85,3 +85,23 @@ class TestSlidingFisherTimeAlignment:
         first = ev.dropna(subset=['g']).iloc[0]
         assert np.isclose(first['time_initial'], 0.0)
         assert np.isclose(first['time'], (w // 2) * dt)
+
+
+class TestSlidingFisherSingleWindow:
+
+    def test_compute_observability_single_window_has_time(self, simulator):
+        n = 8
+        t, x, u, _ = simulator.simulate(x0={'g': 2.0, 'd': 3.0}, u={'u': 0.1 * np.ones(n)},
+                                        return_full_output=True)
+        ev = pybounds.compute_observability(simulator, t, x, u, R={'r': 0.1}, w=n)
+        assert {'time', 'time_initial', 'g', 'd'} <= set(ev.columns)
+        row = ev.dropna(subset=['g'])
+        assert len(row) == 1
+        assert np.isclose(row['time'].item(), t[n // 2])
+
+    def test_single_window_without_time(self):
+        index = pd.MultiIndex.from_tuples([('r', k) for k in range(4)], names=['sensor', 'time_step'])
+        O = pd.DataFrame(np.random.default_rng(2).normal(size=(4, 2)), index=index, columns=['g', 'd'])
+        ev = pybounds.SlidingFisherObservability([O], R=0.1).get_minimum_error_variance()
+        assert list(ev.columns[:2]) == ['time', 'time_initial']
+        assert ev['time'].item() == 2
