@@ -13,6 +13,7 @@ the class does not change.
 
 import sys
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ import pandas as pd
 import yaml
 
 from .observability import (DEFAULT_LAM, SlidingEmpiricalObservabilityMatrix, SlidingFisherObservability,
-                            ObservabilityMatrixImage, _ordered_values, _transform_O_df_list)
+                            ObservabilityMatrixImage, _ordered_values, _transform_O_df, _z_jacobian_function)
 
 
 class _Unset:
@@ -45,20 +46,30 @@ _NOCACHE = object()
 class SlidingO:
     """Observability matrices for every sliding window, as returned by an O builder.
 
+    Give the matrices either as ``O_df_sliding`` (one DataFrame per window) or as ``O`` (one array)
+    with ``index`` and ``state_names``. All windows must share the same rows and states.
+
     :param list O_df_sliding: one pd.DataFrame per window with index names ('sensor', 'time_step')
         and one column per state, in the original (untransformed) coordinates
     :param np.ndarray | None t_sim: time of every point of the trajectory, shape (N,)
-    :param np.ndarray O_index: index into t_sim at which each window starts
-    :param int w: window size in time-steps
+    :param np.ndarray O_index: index into t_sim at which each window starts (default 0, 1, 2, ...)
+    :param int w: window size in time-steps (default: from the 'time_step' level)
     :param dict | None window_data: optional per-window trajectory data
     :param source: the builder's native object, for advanced use
+    :param np.ndarray O: alternative to O_df_sliding: array of shape (n_windows, w*p, n). It is used as is,
+        without a copy (the analysis never modifies it)
+    :param pd.MultiIndex index: row index of every window, names ('sensor', 'time_step') (with O)
+    :param list state_names: column names (with O)
     """
-    O_df_sliding: list
-    t_sim: np.ndarray
-    O_index: np.ndarray
-    w: int
+    O_df_sliding: list = None
+    t_sim: np.ndarray = None
+    O_index: np.ndarray = None
+    w: int = None
     window_data: dict = None
     source: object = None
+    O: np.ndarray = None
+    index: pd.MultiIndex = None
+    state_names: list = None
 
 
 class _Builder(NamedTuple):
@@ -70,21 +81,64 @@ def _from_sliding_object(obj):
     """SlidingO from any object exposing O_df_sliding, t_sim, O_index (and optionally w, window_data)."""
     if isinstance(obj, SlidingO):
         return obj
-    O_df_sliding = list(obj.O_df_sliding)
-    w = getattr(obj, 'w', None)
-    if w is None:
-        w = int(np.max(O_df_sliding[0].index.get_level_values('time_step'))) + 1
-    t_sim = getattr(obj, 't_sim', None)
-    O_index = getattr(obj, 'O_index', None)
-    return SlidingO(O_df_sliding=O_df_sliding,
-                    t_sim=None if t_sim is None else np.ravel(np.asarray(t_sim)),
-                    O_index=np.arange(len(O_df_sliding)) if O_index is None else np.asarray(O_index),
-                    w=int(w), window_data=getattr(obj, 'window_data', None), source=obj)
+    return SlidingO(O_df_sliding=list(obj.O_df_sliding), t_sim=getattr(obj, 't_sim', None),
+                    O_index=getattr(obj, 'O_index', None), w=getattr(obj, 'w', None),
+                    window_data=getattr(obj, 'window_data', None), source=obj)
+
+
+def _from_native(native):
+    """SlidingO holding one stacked array from a sliding object with O_sliding (arrays) and O_df_sliding."""
+    return SlidingO(O=np.stack(native.O_sliding), index=native.O_df_sliding[0].index,
+                    state_names=list(native.O_df_sliding[0].columns), t_sim=native.t_sim,
+                    O_index=native.O_index, w=native.w, window_data=native.window_data, source=native)
+
+
+def _window_array(sliding):
+    """(O, index, state_names) of a SlidingO, with O as one (n_windows, rows, n) float array."""
+    if sliding.O is not None:
+        O = np.asarray(sliding.O, dtype=float)
+        if O.ndim != 3:
+            raise ValueError(f'SlidingO.O must have shape (n_windows, w*p, n), got {O.shape}')
+        if sliding.index is None or sliding.state_names is None:
+            raise ValueError('SlidingO.O needs index (rows) and state_names (columns)')
+        index, state_names = sliding.index, list(sliding.state_names)
+        if len(index) != O.shape[1] or len(state_names) != O.shape[2]:
+            raise ValueError(f'SlidingO.index has {len(index)} rows and state_names {len(state_names)} names, '
+                             f'but O has shape {O.shape}')
+    else:
+        frames = list(sliding.O_df_sliding or [])
+        if not frames:
+            raise ValueError('the observability matrix builder returned no windows')
+        index, state_names = frames[0].index, list(frames[0].columns)
+        O = np.empty((len(frames), len(index), len(state_names)))
+        for k, frame in enumerate(frames):
+            if not frame.index.equals(index) or list(frame.columns) != state_names:
+                raise ValueError(f'window {k} has different rows or states than window 0; '
+                                 'all windows must share the same rows and states')
+            O[k] = frame.to_numpy(dtype=float)
+    if list(index.names) != ['sensor', 'time_step']:
+        raise ValueError(f"the row index names must be ['sensor', 'time_step'], got {list(index.names)}")
+    return O, index, state_names
+
+
+class _WindowFrames(Sequence):
+    """Read-only sequence of per-window DataFrames, built on access from one stored array."""
+
+    def __init__(self, O, index, state_names):
+        self._O, self._index, self._state_names = O, index, state_names
+
+    def __len__(self):
+        return self._O.shape[0]
+
+    def __getitem__(self, k):
+        if isinstance(k, slice):
+            return [self[i] for i in range(*k.indices(len(self)))]
+        return pd.DataFrame(self._O[k], index=self._index, columns=self._state_names, copy=True)
 
 
 def _build_empirical(simulator, t_sim, x_sim, u_sim, *, w, **options):
     """Finite-difference O from a CasADi/do_mpc (or custom) simulator."""
-    return _from_sliding_object(SlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+    return _from_native(SlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
 
 
 def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, **options):
@@ -93,7 +147,7 @@ def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, **options):
         from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
     except ImportError:
         raise ImportError("JAX is not installed. Install it with: pip install jax[cpu]") from None
-    return _from_sliding_object(JaxSlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+    return _from_native(JaxSlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
 
 
 _BUILDERS = {
@@ -257,17 +311,24 @@ class ObservabilityAnalysis:
         None means identity
     :param float | str lam: default regularization for inverting F; 1/lam is the ceiling on the
         minimum error variance. 'limit' computes lam -> 0 symbolically
+    :param bool keep_source: keep the builder's native object (``source``) and its per-window trajectory
+        data (``window_data``) after run(). Off by default because they hold extra copies of O (and, for
+        'empirical', the perturbed simulations), several times the memory of O itself
     :param method_options: options for the chosen method, forwarded to its builder. Only options
         that are given are forwarded, so the builder's own defaults apply otherwise.
         'empirical': eps, parallel_sliding, parallel_perturbation, simulator_factory, n_workers.
         'jax': none (set integrator/substeps on the JaxSimulator)
+
+    Memory: after run() the observability matrices are held once, as one (n_windows, w*p, n) float
+    array (8 * n_windows * w * p * n bytes). Queries build one window's data at a time.
     """
 
-    _O_SETTINGS = ('method', 'w', 'aux_list', 'z_function', 'z_state_names')
+    _O_SETTINGS = ('method', 'w', 'aux_list', 'z_function', 'z_state_names', 'keep_source')
     _QUERY_SETTINGS = ('R', 'lam')
 
     def __init__(self, simulator, t_sim, x_sim, u_sim, *, method=None, w=None, aux_list=None,
-                 z_function=None, z_state_names=None, R=None, lam=DEFAULT_LAM, **method_options):
+                 z_function=None, z_state_names=None, R=None, lam=DEFAULT_LAM, keep_source=False,
+                 **method_options):
         self.simulator = simulator
         self._t_sim_in = t_sim
         self._x_sim_in = x_sim
@@ -278,7 +339,7 @@ class ObservabilityAnalysis:
             method = 'jax' if _is_jax_simulator(simulator) else 'empirical'
 
         self._settings = {'method': method, 'w': w, 'aux_list': aux_list, 'z_function': z_function,
-                          'z_state_names': z_state_names, 'R': R, 'lam': lam}
+                          'z_state_names': z_state_names, 'keep_source': bool(keep_source), 'R': R, 'lam': lam}
         self._method_options = {}
         self._validate_method(method, method_options, aux_list)
         self._method_options = dict(method_options)
@@ -288,18 +349,21 @@ class ObservabilityAnalysis:
     # ------------------------------------------------------------------ construction from existing O
 
     @classmethod
-    def from_sliding(cls, obj, *, R=None, lam=DEFAULT_LAM):
+    def from_sliding(cls, obj, *, R=None, lam=DEFAULT_LAM, keep_source=False):
         """Wrap observability matrices that were already computed.
 
         :param obj: a SlidingO, or an object with O_df_sliding, t_sim and O_index attributes
-            (e.g. SlidingEmpiricalObservabilityMatrix, JaxSlidingEmpiricalObservabilityMatrix)
+            (e.g. SlidingEmpiricalObservabilityMatrix, JaxSlidingEmpiricalObservabilityMatrix).
+            A list of DataFrames is copied into one array (the caller's list is not kept); a
+            SlidingO(O=array, index=..., state_names=...) is used without a copy.
+        :param bool keep_source: keep obj (as ``source``) and its window_data
         """
         self = cls.__new__(cls)
         self.simulator = None
         self._t_sim_in = self._x_sim_in = self._u_sim_in = None
         self._external = True
         self._settings = {'method': 'external', 'w': None, 'aux_list': None, 'z_function': None,
-                          'z_state_names': None, 'R': R, 'lam': lam}
+                          'z_state_names': None, 'keep_source': bool(keep_source), 'R': R, 'lam': lam}
         self._method_options = {}
         self._discard_results()
         self._store(_from_sliding_object(obj))
@@ -358,6 +422,7 @@ class ObservabilityAnalysis:
         a record of the simulator, and metadata."""
         hyperparameters = {'method': self.method, 'w': self._settings['w'],
                            'z_state_names': self._settings['z_state_names'],
+                           'keep_source': self._settings['keep_source'],
                            'R': _R_to_yaml(self._settings['R']), 'lam': self._settings['lam']}
         references = {k: _reference(self._settings[k]) for k in self._REFERENCE_SETTINGS}
         for key, value in self._method_options.items():
@@ -455,7 +520,7 @@ class ObservabilityAnalysis:
 
     @property
     def is_computed(self):
-        return self._result is not None
+        return self._O is not None
 
     def run(self):
         """Build the observability matrix of every window with the current settings. Returns self."""
@@ -471,33 +536,54 @@ class ObservabilityAnalysis:
         return self
 
     def _store(self, result):
-        """Keep a builder result, applying the coordinate transform if one is set."""
-        n_windows = len(result.O_df_sliding)
+        """Keep a builder result as one array, applying the coordinate transform if one is set."""
+        O, index, state_names = _window_array(result)
+        n_windows = O.shape[0]
+        O_index = np.arange(n_windows) if result.O_index is None else np.asarray(result.O_index)
         if n_windows == 0:
             raise ValueError('the observability matrix builder returned no windows')
-        if not np.array_equal(np.asarray(result.O_index), np.arange(n_windows)):
+        if not np.array_equal(O_index, np.arange(n_windows)):
             raise NotImplementedError('only windows starting at every time-step (O_index = 0, 1, 2, ...) are '
                                       'supported for time alignment')
 
-        O_df_sliding = [O.copy() for O in result.O_df_sliding]
         dxdz_sliding = None
         z_function = self._settings['z_function']
         if z_function is not None:
             if self._settings['z_state_names'] is None:
-                warnings.warn('z_function is set without z_state_names, so the transformed states keep the '
-                              'original state names', UserWarning, stacklevel=3)
-            x0_list = self._trajectory_states(O_df_sliding[0].shape[1])[np.asarray(result.O_index)]
-            O_df_sliding, dxdz_sliding = _transform_O_df_list(O_df_sliding, x0_list, z_function,
-                                                              self._settings['z_state_names'], return_dxdz=True)
+                warnings.warn('z_function is set without z_state_names, so the transformed states are named '
+                              '0, 1, 2, ...', UserWarning, stacklevel=3)
+            O, state_names, dxdz_sliding = self._transform(O, index, state_names, O_index)
 
-        self._result = result
-        self._O_df_sliding = O_df_sliding
+        O = O.view()
+        O.flags.writeable = False   # never modified; also protects an array passed in via SlidingO(O=...)
+        self._O = O
+        self._index = index
+        self._state_names = state_names
         self._dxdz_sliding = dxdz_sliding
-        self._state_names = list(O_df_sliding[0].columns)
-        index = O_df_sliding[0].index
         self._sensor_names = list(pd.unique(np.asarray(index.get_level_values('sensor'), dtype=object)))
         self._time_steps = sorted(int(k) for k in pd.unique(index.get_level_values('time_step')))
+        self._t_sim = None if result.t_sim is None else np.ravel(np.asarray(result.t_sim))
+        self._O_index = O_index
+        self._w = int(result.w) if result.w is not None else self._time_steps[-1] + 1
+        keep = self._settings['keep_source']
+        self._source = result.source if keep else None
+        self._window_data = result.window_data if keep else None
         self.clear_cache()
+
+    def _transform(self, O, index, state_names, O_index):
+        """Transform every window to z coordinates at its initial state, one window at a time."""
+        x0_list = self._trajectory_states(O.shape[2])[O_index]
+        dzdx_function = _z_jacobian_function(self._settings['z_function'], O.shape[2])
+        O_z = np.empty_like(O)
+        dxdz_sliding = []
+        z_names = None
+        for k in range(O.shape[0]):
+            frame = pd.DataFrame(O[k], index=index, columns=state_names, copy=True)
+            frame_z, dxdz = _transform_O_df(frame, x0_list[k], dzdx_function, self._settings['z_state_names'])
+            O_z[k] = frame_z.to_numpy(dtype=float)
+            dxdz_sliding.append(dxdz)
+            z_names = list(frame_z.columns)
+        return O_z, z_names, dxdz_sliding
 
     def _trajectory_states(self, n):
         """x_sim as an (N, n) array, in the simulator's state order."""
@@ -508,10 +594,11 @@ class ObservabilityAnalysis:
         return x_sim.reshape(x_sim.shape[0], n)
 
     def _discard_results(self):
-        self._result = None
-        self._O_df_sliding = None
+        self._O = self._index = None
         self._dxdz_sliding = None
         self._state_names = self._sensor_names = self._time_steps = None
+        self._t_sim = self._O_index = self._w = None
+        self._source = self._window_data = None
         self._cache = {}
 
     def clear_cache(self):
@@ -519,9 +606,13 @@ class ObservabilityAnalysis:
         self._cache = {}
 
     def _require_computed(self):
-        if self._result is None:
+        if self._O is None:
             raise RuntimeError('observability matrices have not been computed with the current settings; '
                                'call run() first')
+
+    def _frames(self):
+        """Per-window DataFrames, built on access."""
+        return _WindowFrames(self._O, self._index, self._state_names)
 
     # ------------------------------------------------------------------ results (after run)
 
@@ -531,11 +622,11 @@ class ObservabilityAnalysis:
 
     @property
     def w(self):
-        return self._computed(self._result).w
+        return self._computed(self._w)
 
     @property
     def n_windows(self):
-        return len(self._computed(self._O_df_sliding))
+        return self._computed(self._O).shape[0]
 
     @property
     def state_names(self):
@@ -552,12 +643,12 @@ class ObservabilityAnalysis:
 
     @property
     def t_sim(self):
-        t_sim = self._computed(self._result).t_sim
+        t_sim = self._computed(self._t_sim)
         return None if t_sim is None else t_sim.copy()
 
     @property
     def O_index(self):
-        return np.array(self._computed(self._result).O_index)
+        return np.array(self._computed(self._O_index))
 
     @property
     def O_time(self):
@@ -566,12 +657,20 @@ class ObservabilityAnalysis:
 
     @property
     def O_df_sliding(self):
-        """Copies of the observability matrix of every window (transformed if z_function is set)."""
-        return [O.copy() for O in self._computed(self._O_df_sliding)]
+        """New DataFrames of every window's observability matrix (transformed if z_function is set).
+
+        This builds all windows at once, a full copy of O; use observability_matrix(k) for one window.
+        """
+        self._require_computed()
+        return list(self._frames())
 
     @property
     def window_data(self):
-        return self._computed(self._result).window_data
+        """The builder's per-window trajectory data (only with keep_source=True)."""
+        self._require_computed()
+        if not self._settings['keep_source']:
+            raise RuntimeError('window_data is not kept by default; set keep_source=True and call run()')
+        return self._window_data
 
     @property
     def dxdz_sliding(self):
@@ -581,8 +680,12 @@ class ObservabilityAnalysis:
 
     @property
     def source(self):
-        """The builder's native object (e.g. the SlidingEmpiricalObservabilityMatrix); O is untransformed there."""
-        return self._computed(self._result).source
+        """The builder's native object, e.g. the SlidingEmpiricalObservabilityMatrix (only with
+        keep_source=True). O is untransformed there."""
+        self._require_computed()
+        if not self._settings['keep_source']:
+            raise RuntimeError('source is not kept by default; set keep_source=True and call run()')
+        return self._source
 
     # ------------------------------------------------------------------ queries
 
@@ -626,10 +729,13 @@ class ObservabilityAnalysis:
         """
         states, sensors, time_steps = self._select(states, sensors, time_steps)
         R, lam = self._resolve(R, lam, sensors)
-        return SlidingFisherObservability(self._O_df_sliding, R=R, lam=lam, time=self._result.t_sim,
+        return self._sliding_fisher(states, sensors, time_steps, R, lam, force_R_scalar, keep_windows=True)
+
+    def _sliding_fisher(self, states, sensors, time_steps, R, lam, force_R_scalar, keep_windows):
+        return SlidingFisherObservability(self._frames(), R=R, lam=lam, time=self._t_sim,
                                           states=states, sensors=sensors,
                                           time_steps=None if time_steps is None else np.array(time_steps),
-                                          w=None, force_R_scalar=force_R_scalar)
+                                          w=None, force_R_scalar=force_R_scalar, keep_windows=keep_windows)
 
     def min_error_variance(self, states=None, sensors=None, time_steps=None, *,
                            R=_UNSET, lam=_UNSET, force_R_scalar=False):
@@ -646,8 +752,8 @@ class ObservabilityAnalysis:
         if cacheable and key in self._cache:
             return self._cache[key].copy()
 
-        ev = self.fisher(states_l, sensors_l, time_steps_l, R=R_r, lam=lam_r,
-                         force_R_scalar=force_R_scalar).get_minimum_error_variance()
+        ev = self._sliding_fisher(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar,
+                                  keep_windows=False).get_minimum_error_variance()
         if cacheable:
             self._cache[key] = ev.copy()
         return ev
@@ -656,7 +762,7 @@ class ObservabilityAnalysis:
         """Copy of one window's observability matrix, optionally restricted to a selection
         (rows then ordered by time_step, sensor, as used for the Fisher information)."""
         states, sensors, time_steps = self._select(states, sensors, time_steps)
-        O = self._O_df_sliding[window].copy()
+        O = self._frames()[window]
         if states is None and sensors is None and time_steps is None:
             return O
         return O.loc[(sensors or self._sensor_names, time_steps or self._time_steps),
@@ -726,8 +832,8 @@ class ObservabilityAnalysis:
             'all_sensors': self._sensor_names,
             'all_time_steps': self._time_steps,
             'transformed_coordinates': self._settings['z_function'] is not None,
-            'w': self._result.w,
-            'n_windows': len(self._O_df_sliding),
+            'w': self._w,
+            'n_windows': self._O.shape[0],
             'time_alignment': 'each window is stamped at its center time-step, time_initial + (w // 2) * dt',
             'analysis': self._settings_document(),
         }
@@ -736,19 +842,16 @@ class ObservabilityAnalysis:
         return {k: str(f) for k, f in files.items()}
 
     def _save_observability_matrices(self, path):
-        index = self._O_df_sliding[0].index
-        if any(not O.index.equals(index) or list(O.columns) != self._state_names for O in self._O_df_sliding):
-            raise ValueError('windows have different rows or columns; cannot stack them into one array')
-        arrays = {'O': np.stack([O.to_numpy(dtype=float) for O in self._O_df_sliding]),
+        arrays = {'O': self._O,
                   'state_names': np.array(self._state_names, dtype=str),
-                  'sensor': np.array(index.get_level_values('sensor'), dtype=str),
-                  'time_step': np.array(index.get_level_values('time_step'), dtype=int),
-                  'O_index': np.asarray(self._result.O_index, dtype=int)}
-        if self._result.t_sim is not None:
-            arrays['t_sim'] = np.asarray(self._result.t_sim, dtype=float)
+                  'sensor': np.array(self._index.get_level_values('sensor'), dtype=str),
+                  'time_step': np.array(self._index.get_level_values('time_step'), dtype=int),
+                  'O_index': np.asarray(self._O_index, dtype=int)}
+        if self._t_sim is not None:
+            arrays['t_sim'] = np.asarray(self._t_sim, dtype=float)
             arrays['window_time_initial'] = arrays['t_sim'][arrays['O_index']]
         np.savez(path, **arrays)
 
     def __repr__(self):
-        status = f'computed, {len(self._O_df_sliding)} windows' if self.is_computed else 'not computed'
+        status = f'computed, {self._O.shape[0]} windows' if self.is_computed else 'not computed'
         return f'ObservabilityAnalysis(method={self.method!r}, w={self._settings["w"]!r}, {status})'

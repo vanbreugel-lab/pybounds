@@ -842,6 +842,21 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
     return O_z, dxdz, dzdx_sym
 
 
+def _z_jacobian_function(z_function, n):
+    """Numerical dz/dx function of a coordinate transform over n states (symbolic Jacobian built once)."""
+    x_sym = sp.symbols('x_0:%d' % n)
+    return SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+
+
+def _transform_O_df(O_df, x0, dzdx_function, z_state_names):
+    """One window of transform_states: returns (O_z, dx/dz) with O_z = O_df @ dx/dz at x0."""
+    dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
+    O_z = O_df @ dxdz
+    if z_state_names is not None:
+        O_z.columns = z_state_names
+    return O_z, dxdz
+
+
 def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_dxdz=False):
     """Apply ``transform_states`` to each O data-frame at its own x0.
 
@@ -849,16 +864,12 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_d
     builds (and simplifies) the symbolic Jacobian only once. With return_dxdz=True,
     also returns the list of numerical dx/dz Jacobians (one per window).
     """
-    x_sym = sp.symbols('x_0:%d' % O_df_list[0].shape[1])
-    dzdx_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+    dzdx_function = _z_jacobian_function(z_function, O_df_list[0].shape[1])
 
     O_df_z = []
     dxdz_list = []
     for O_df, x0 in zip(O_df_list, x0_list):
-        dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
-        O_z = O_df @ dxdz
-        if z_state_names is not None:
-            O_z.columns = z_state_names
+        O_z, dxdz = _transform_O_df(O_df, x0, dzdx_function, z_state_names)
         O_df_z.append(O_z)
         dxdz_list.append(dxdz)
 

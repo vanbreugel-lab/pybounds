@@ -123,6 +123,15 @@ class TestEquivalence:
                                          time_steps=np.arange(WINDOW_SIZE))
         pd.testing.assert_frame_equal(explicit, oa.min_error_variance())
 
+    def test_source_and_window_data_are_opt_in(self, oa, simulator, trajectory):
+        with pytest.raises(RuntimeError, match='keep_source=True'):
+            oa.source
+        with pytest.raises(RuntimeError, match='keep_source=True'):
+            oa.window_data
+        kept = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE, eps=EPS, keep_source=True).run()
+        assert isinstance(kept.source, pybounds.SlidingEmpiricalObservabilityMatrix)
+        assert set(kept.window_data) == {'t', 'u', 'y', 'y_plus', 'y_minus'}
+
     def test_attributes(self, oa, seom):
         assert oa.method == 'empirical'
         assert oa.w == WINDOW_SIZE
@@ -132,8 +141,6 @@ class TestEquivalence:
         assert oa.time_steps == list(range(WINDOW_SIZE))
         np.testing.assert_array_equal(oa.O_index, np.arange(N_WINDOWS))
         np.testing.assert_allclose(oa.O_time, seom.t_sim[:N_WINDOWS])
-        assert isinstance(oa.source, pybounds.SlidingEmpiricalObservabilityMatrix)
-        assert set(oa.window_data) == {'t', 'u', 'y', 'y_plus', 'y_minus'}
         assert oa.dxdz_sliding is None
         for O_a, O_b in zip(oa.O_df_sliding, seom.O_df_sliding):
             pd.testing.assert_frame_equal(O_a, O_b)
@@ -207,12 +214,12 @@ class TestMethodsAndOptions:
         """parallel_sliding with a thread-safe custom simulator gives the sequential result."""
         seq = ObservabilityAnalysis(AnalyticSimulator(), *trajectory, w=WINDOW_SIZE, eps=EPS, R=0.1).run()
         par = ObservabilityAnalysis(AnalyticSimulator(), *trajectory, w=WINDOW_SIZE, eps=EPS, R=0.1,
-                                    parallel_sliding=True).run()
+                                    parallel_sliding=True, keep_source=True).run()
         assert par.source.parallel_sliding is True
         pd.testing.assert_frame_equal(par.min_error_variance(), seq.min_error_variance())
 
     def test_builder_default_eps_applies(self, simulator, trajectory):
-        oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE).run()
+        oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE, keep_source=True).run()
         assert oa.source.eps == 1e-5
 
 
@@ -325,11 +332,11 @@ class TestCaching:
     def test_cache_hits(self, oa_fresh, monkeypatch):
         oa_fresh.min_error_variance(states=['d'])
         calls = []
-        monkeypatch.setattr(oa_fresh, 'fisher', lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(oa_fresh, '_sliding_fisher', lambda *a, **k: calls.append(1))
         oa_fresh.min_error_variance(states=['d'])
         assert calls == []
         oa_fresh.clear_cache()
-        with pytest.raises(AttributeError):   # the stubbed fisher() is called again after clearing
+        with pytest.raises(AttributeError):   # the stubbed computation is called again after clearing
             oa_fresh.min_error_variance(states=['d'])
 
 
@@ -460,7 +467,7 @@ class TestSettingsYaml:
         document = yaml.safe_load(open(path))
         assert set(document) == {'pybounds_version', 'created', 'settings', 'references', 'simulator'}
         assert document['settings'] == {'method': 'empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
-                                        'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
+                                        'keep_source': False, 'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
         assert document['simulator']['state_names'] == ['g', 'd']
         assert document['simulator']['dt'] == 0.01
 
