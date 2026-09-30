@@ -25,7 +25,7 @@ At commit 7b69d66, `ObservabilityAnalysis` used several times more memory than t
 - **Matrix R:** unchanged.
 - **Per-window objects:** `SlidingFisherObservability(keep_windows=False)` drops each window's `FisherObservability` after use, and `min_error_variance` uses it.
 
-A and B change no results: tests compare against a verbatim copy of the 7b69d66 classes (`tests/reference_7b69d66.py`), and a separate check against the 7b69d66 package matched 357 result frames exactly, including the process- and thread-parallel paths.
+A and B change no results: tests compare against a verbatim copy of the 7b69d66 classes (`tests/reference_7b69d66.py`). A separate check against the 7b69d66 package matched 357 result frames exactly, under both pandas 3 and pandas 2.3, including the process- and thread-parallel paths. `FisherObservability` still copies each window's O before selecting from it: under pandas < 3 that copy also normalizes the memory layout, which keeps the matrix products bit-identical.
 
 ### C. Optional Fisher-information storage (`storage=`)
 Per window, the representations below were compared.
@@ -67,11 +67,11 @@ Setup: 250 samples, 40 states, 66 sensors, a linear system with the finite-diffe
 | w | Version / storage | One O | Peak during `run()` | Held after `run()` | Peak, `min_error_variance` | Peak, `fisher()` / `fisher_information()` |
 |---|---|---|---|---|---|---|
 | 5 | 7b69d66 | 26 MB | 134 MB (5.2× O) | 134 MB (5.2×) | 15.4 MB | 14.3 MB |
-| 5 | `'observability'` | 26 MB | 28 MB (1.06×) | 26 MB (1.0×) | 1.8 MB | 7.1 MB |
+| 5 | `'observability'` | 26 MB | 28 MB (1.06×) | 26 MB (1.0×) | 1.7 MB | 7.6 MB |
 | 5 | `'fisher_per_sensor'` | 26 MB | 108 MB (4.2×) | 107 MB (4.1×) | 5.8 MB | 5.8 MB |
 | 5 | `'fisher'` | 26 MB | 3 MB (0.12×) | 1.7 MB | 5.8 MB | 5.8 MB |
 | 100 | 7b69d66 | 319 MB | 1618 MB (5.1×) | 1618 MB (5.1×) | 1222 MB | 1221 MB |
-| 100 | `'observability'` | 319 MB | 343 MB (1.08×) | 319 MB (1.0×) | 5.3 MB | 32.4 MB |
+| 100 | `'observability'` | 319 MB | 343 MB (1.08×) | 319 MB (1.0×) | 5.7 MB | 33.1 MB |
 | 100 | `'fisher_per_sensor'` | 319 MB | 90 MB (0.28×) | 65 MB (0.21×) | 3.5 MB | 3.5 MB |
 | 100 | `'fisher'` | 319 MB | 25 MB (0.08×) | 1.1 MB | 3.5 MB | 3.5 MB |
 

@@ -1,3 +1,4 @@
+from pathlib import Path
 """ObservabilityAnalysis storage modes: 'observability' (default), 'fisher_per_sensor', 'fisher'."""
 import numpy as np
 import pandas as pd
@@ -137,7 +138,7 @@ class TestUnsupported:
         with pytest.raises(ValueError, match="include_observability_matrices needs"):
             fa.save_results(tmp_path, include_observability_matrices=True)
         files = fa.save_results(tmp_path)   # the error variance itself can be saved
-        assert yaml.safe_load(open(files['sidecar']))['storage'] == storage
+        assert yaml.safe_load(Path(files['sidecar']).read_text())['storage'] == storage
 
 
 class TestRecomputeWindow:

@@ -1,3 +1,4 @@
+from pathlib import Path
 import inspect
 import subprocess
 import sys
@@ -464,7 +465,7 @@ class TestSettingsYaml:
     def test_file_is_plain_yaml(self, simulator, trajectory, tmp_path):
         import yaml
         _, _, path = self._roundtrip(simulator, trajectory, tmp_path, w=WINDOW_SIZE, eps=1e-4, R={'r': 0.1})
-        document = yaml.safe_load(open(path))
+        document = yaml.safe_load(Path(path).read_text())
         assert set(document) == {'pybounds_version', 'created', 'settings', 'references', 'simulator'}
         assert document['settings'] == {'method': 'empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
                                         'storage': 'observability', 'fisher_sensors': None, 'keep_source': False,
@@ -488,7 +489,7 @@ class TestSettingsYaml:
         oa = ObservabilityAnalysis(simulator, *trajectory, z_function=z_optic_flow, z_state_names=['q', 'd'],
                                    simulator_factory=_module_level_factory, aux_list=[None] * N_STEPS_SLIDING)
         path = oa.save_settings(tmp_path / 's.yaml')
-        references = yaml.safe_load(open(path))['references']
+        references = yaml.safe_load(Path(path).read_text())['references']
         assert references == {'aux_list': '<set>', 'z_function': 'test_analysis:z_optic_flow',
                               'simulator_factory': 'test_analysis:_module_level_factory'}
         with pytest.warns(UserWarning, match=r"references \['aux_list', 'z_function', 'simulator_factory'\]"):
@@ -545,7 +546,7 @@ class TestSaveResults:
         ev = pd.read_csv(files['min_error_variance'])
         pd.testing.assert_frame_equal(ev, oa_fresh.min_error_variance(states=['d'], time_steps=[0, 1, 2], lam=1e-6),
                                       check_index_type=False)
-        sidecar = yaml.safe_load(open(files['sidecar']))
+        sidecar = yaml.safe_load(Path(files['sidecar']).read_text())
         assert sidecar['selection'] == {'states': ['d'], 'sensors': ['r'], 'time_steps': [0, 1, 2],
                                         'R': {'r': 0.1}, 'lam': 1e-6, 'force_R_scalar': False}
         assert sidecar['all_states'] == ['g', 'd']
@@ -559,7 +560,7 @@ class TestSaveResults:
     def test_default_selection_records_everything(self, oa_fresh, tmp_path):
         import yaml
         files = oa_fresh.save_results(tmp_path)
-        selection = yaml.safe_load(open(files['sidecar']))['selection']
+        selection = yaml.safe_load(Path(files['sidecar']).read_text())['selection']
         assert selection['states'] == ['g', 'd'] and selection['sensors'] == ['r']
 
     def test_observability_matrices_npz(self, oa_fresh, tmp_path):
@@ -582,7 +583,7 @@ class TestSaveResults:
         with np.load(files['observability_matrices']) as data:
             assert list(data['state_names']) == ['q', 'd']
             np.testing.assert_array_equal(data['O'][0], oa.O_df_sliding[0].values)
-        sidecar = yaml.safe_load(open(files['sidecar']))
+        sidecar = yaml.safe_load(Path(files['sidecar']).read_text())
         assert sidecar['transformed_coordinates'] is True
         assert sidecar['analysis']['references']['z_function'] == 'test_analysis:z_optic_flow'
 

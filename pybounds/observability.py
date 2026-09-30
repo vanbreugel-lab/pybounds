@@ -573,8 +573,10 @@ class FisherObservability:
         self._R = None       # R and R_inv are built on first access when R is diagonal (scalar or dict)
         self._R_inv = None
         self._R_diag = None
-        if isinstance(O, pd.DataFrame):  # data-frame given (not modified: the subset below is a new frame)
-            self.O = O
+        if isinstance(O, pd.DataFrame):  # data-frame given
+            # The copy also normalizes the memory layout of O (pandas < 3), which keeps the matrix products,
+            # and so F, bit-identical to previous versions whatever layout the caller's DataFrame has
+            self.O = O.copy()
             self.sensor_names = tuple(O.index.get_level_values('sensor'))
             self.state_names = tuple(O.columns)
         elif isinstance(O, np.ndarray):  # array given, treat each row as one time-step of a single sensor 'y'
