@@ -541,8 +541,11 @@ class FisherObservability:
         # Make O a data-frame
         self.pw = O.shape[0]  # number of sensors * time-steps
         self.n = O.shape[1]  # number of states
-        if isinstance(O, pd.DataFrame):  # data-frame given
-            self.O = O.copy()
+        self._R = None       # R and R_inv are built on first access when R is diagonal (scalar or dict)
+        self._R_inv = None
+        self._R_diag = None
+        if isinstance(O, pd.DataFrame):  # data-frame given (not modified: the subset below is a new frame)
+            self.O = O
             self.sensor_names = tuple(O.index.get_level_values('sensor'))
             self.state_names = tuple(O.columns)
         elif isinstance(O, np.ndarray):  # array given, treat each row as one time-step of a single sensor 'y'
@@ -597,12 +600,16 @@ class FisherObservability:
             raise Exception('R must be a scalar')
 
         else:  # non-scalar R
-            self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-            self.R_inv = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
             self.set_noise_covariance(R=R)
 
             # Calculate Fisher Information Matrix for non-scalar R
-            self.F = self.O.values.T @ self.R_inv.values @ self.O.values
+            if self._R_diag is not None:  # diagonal R: O^T R^-1 O without a (w*p x w*p) matrix
+                # (O^T * r_inv) equals O^T @ diag(r_inv) exactly (one nonzero term per element), so F is
+                # bit-identical to the dense product below
+                O_values = self.O.values
+                self.F = np.ascontiguousarray(O_values.T * (1 / self._R_diag)) @ O_values
+            else:
+                self.F = self.O.values.T @ self.R_inv.values @ self.O.values
 
         self.F = pd.DataFrame(self.F, index=self.O.columns, columns=self.O.columns)
 
@@ -630,39 +637,39 @@ class FisherObservability:
 
     def set_noise_covariance(self, R=None):
         """ Set the measurement noise covariance matrix.
+
+        A scalar, dict or None R is diagonal: it is kept as one variance per row of O (self._R_diag), and
+        the R / R_inv data-frames are only built if accessed. A matrix R is stored as a data-frame.
         """
+        self._R = self._R_inv = self._R_diag = None
 
-        # Preallocate the noise covariance matrix R
-        self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-
-        # Set R based on values in dict
+        # Diagonal R: one variance per row of O
         if isinstance(R, dict):  # set each distinct sensor's noise level
-            for s in pd.unique(self.R.index.get_level_values('sensor')):
-                R_sensor = self.R.loc[[s], [s]]
-                for r in range(R_sensor.shape[0]):
-                    R_sensor.iloc[r, r] = R[s]
+            self._R_diag = np.array([float(R[s]) for s in self.O.index.get_level_values('sensor')])
+            return
+        if R is None:  # set R as identity matrix
+            warnings.warn('R not set, defaulting to identity matrix')
+            self._R_diag = np.ones(self.pw)
+            return
+        if not isinstance(R, (pd.DataFrame, np.ndarray)) or (isinstance(R, np.ndarray) and R.ndim != 2):
+            if np.size(R) == 1:  # scalar multiplied by identity matrix
+                self._R_diag = np.full(self.pw, float(np.squeeze(R)))
+                return
+            raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
 
-                self.R.loc[[s], [s]] = R_sensor.values
-        else:
-            if R is None:  # set R as identity matrix
-                warnings.warn('R not set, defaulting to identity matrix')
-            else:  # set R directly
-                if isinstance(R, pd.DataFrame):  # matrix R in data-frame, aligned with O by index labels
-                    self.R = R.loc[self.O.index, self.O.index].copy()
-                elif isinstance(R, np.ndarray) and R.ndim == 2:  # matrix in array
-                    n_full = len(self._O_index_full)
-                    if R.shape == (n_full, n_full):  # rows/columns in the order of the O passed in
-                        R_full = pd.DataFrame(R, index=self._O_index_full, columns=self._O_index_full)
-                        self.R = R_full.loc[self.O.index, self.O.index].copy()
-                    elif R.shape == (self.pw, self.pw):  # already matches the subset & sorted O
-                        self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
-                    else:
-                        raise ValueError(f'R array must be ({n_full}, {n_full}) to match O, '
-                                         f'or ({self.pw}, {self.pw}) to match the selected subset of O')
-                elif np.size(R) == 1:  # scalar multiplied by identity matrix
-                    self.R = float(np.squeeze(R)) * self.R
-                else:
-                    raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
+        # Matrix R
+        if isinstance(R, pd.DataFrame):  # matrix R in data-frame, aligned with O by index labels
+            self.R = R.loc[self.O.index, self.O.index].copy()
+        else:  # matrix in array
+            n_full = len(self._O_index_full)
+            if R.shape == (n_full, n_full):  # rows/columns in the order of the O passed in
+                R_full = pd.DataFrame(R, index=self._O_index_full, columns=self._O_index_full)
+                self.R = R_full.loc[self.O.index, self.O.index].copy()
+            elif R.shape == (self.pw, self.pw):  # already matches the subset & sorted O
+                self.R = pd.DataFrame(R, index=self.O.index, columns=self.O.index)
+            else:
+                raise ValueError(f'R array must be ({n_full}, {n_full}) to match O, '
+                                 f'or ({self.pw}, {self.pw}) to match the selected subset of O')
 
         # Inverse of R
         R_diagonal = np.diag(self.R.values)
@@ -674,13 +681,35 @@ class FisherObservability:
 
         self.R_inv = pd.DataFrame(self.R_inv, index=self.R.index, columns=self.R.index)
 
+    @property
+    def R(self):
+        """Measurement noise covariance as a (w*p x w*p) data-frame (built on first access for diagonal R)."""
+        if self._R is None and self._R_diag is not None:
+            self._R = pd.DataFrame(np.diag(self._R_diag), index=self.O.index, columns=self.O.index)
+        return self._R
+
+    @R.setter
+    def R(self, value):
+        self._R = value
+
+    @property
+    def R_inv(self):
+        """Inverse of R as a data-frame (built on first access for diagonal R)."""
+        if self._R_inv is None and self._R_diag is not None:
+            self._R_inv = pd.DataFrame(np.diag(1 / self._R_diag), index=self.O.index, columns=self.O.index)
+        return self._R_inv
+
+    @R_inv.setter
+    def R_inv(self, value):
+        self._R_inv = value
+
     def get_fisher_information(self):
         return self.F.copy(), self.F_inv.copy(), self.R.copy()
 
 
 class SlidingFisherObservability:
     def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
-                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False):
+                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False, keep_windows=True):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
 
@@ -700,6 +729,8 @@ class SlidingFisherObservability:
         :param None | tuple | list | np.array w: window size to use from O's,
             if None then just grab it from O as the maximum window size
         :param bool force_R_scalar: force R to be a scalar in each window (see FisherObservability)
+        :param bool keep_windows: keep each window's FisherObservability object in self.FO. With False, only
+            the error variance is kept (self.FO stays empty), so memory does not grow with the number of windows
         """
 
         self.O_list = O_list
@@ -730,7 +761,8 @@ class SlidingFisherObservability:
             # Compute Fisher information & inverse
             FO = FisherObservability(O, R=R, lam=lam, force_R_scalar=force_R_scalar,
                                      states=states, sensors=sensors, time_steps=time_steps, w=w)
-            self.FO.append(FO)
+            if keep_windows:
+                self.FO.append(FO)
 
             # Collect error variance data
             ev = FO.error_variance.copy()
