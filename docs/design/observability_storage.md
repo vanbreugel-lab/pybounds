@@ -96,6 +96,50 @@ Setup: 250 samples, 40 states, 66 sensors, a linear system with the finite-diffe
 - Run times are unchanged.
 - `tests/test_memory_benchmark.py` runs a smaller version of the allocation table in CI.
 
+## Query speed
+With `storage='observability'`, each query used to build a `FisherObservability` per window. About 90% of the time went to pandas `.loc[(sensors, time_steps), states]` and `sort_values` on every window.
+
+**The change:**
+- All windows share one row index, so the selected rows (in `FisherObservability`'s time_step/sensor order), columns and noise weights are computed once per query.
+- Each window is sliced from the stored array in the same Fortran layout `FisherObservability` produces, then runs the same 2-D matrix products and inversion. The results are bit-identical.
+- **Guard:** each query also computes window 0 through `FisherObservability`, and falls back to the per-window path if the rows, columns, F or error variance differ.
+- **Matrix R** always uses the per-window path. So does `fisher()`, because it returns per-window objects; use `fisher_information()` for speed.
+
+**Measured** (889 samples, 40 states, 66 sensors, selecting 9 states × 7 sensors):
+
+| w | Windows | `min_error_variance` before | After | `fisher_information` after |
+|---|---|---|---|---|
+| 5 | 885 | 0.91 s | 0.08 s (12×) | 0.01 s |
+| 100 | 790 | 9.5 s | 0.14 s (67×) | 0.06 s |
+| 200 | 690 | 20.1 s | 0.23 s (89×) | 0.09 s |
+
+## JAX `batch_size`
+Without batching, the JAX builder computes every window in one batched call. For dynamics that XLA can't fuse, the peak is about 2.2× O: the `jacfwd` output plus its transposed copy. Linear dynamics peak lower (about 1.2× O).
+
+`batch_size` (an option of `JaxSlidingEmpiricalObservabilityMatrix`, and of `ObservabilityAnalysis` with `method='jax'`) computes at most that many windows per call:
+- **The analysis streams the chunks** straight into its storage.
+- **Every chunk has the same size:** the last chunk is padded by repeating its last window, and the padding is dropped, so the batched functions compile only once.
+
+**Measured process peak during `run()`** (RSS; 889 samples, 40 states, 66 sensors, CPU, JAX 0.10):
+
+| Dynamics | w | O | Storage | No batching | `batch_size=32` |
+|---|---|---|---|---|---|
+| nonlinear | 100 | 1.67 GB | `'observability'` | 3.69 GB (2.21× O) | 1.90 GB (1.14×) |
+| nonlinear | 200 | 2.91 GB | `'observability'` | 6.40 GB (2.20×) | 3.36 GB (1.15×) |
+| nonlinear | 200 | 2.91 GB | `'fisher_per_sensor'` | 6.40 GB (2.20×) | 0.74 GB (0.26×) |
+| linear | 200 | 2.91 GB | `'observability'` | 3.44 GB (1.18×) | 3.22 GB (1.11×) |
+| linear | 200 | 2.91 GB | `'fisher_per_sensor'` | 3.44 GB (1.18×) | 0.60 GB (0.21×) |
+
+**Speed:** at w = 100, `run()` took 1.2 s unbatched, and 3.0 / 2.0 / 1.7 s with `batch_size` = 8 / 32 / 128, including compilation.
+
+**Effect on results:**
+- **Windows are independent,** but XLA vectorizes across the batch, so where a window sits in a batch can change its last bit.
+- **40-state system:** every batch size from 1 to 790 gave Jacobians bit-identical to the unbatched run.
+- **2-state, 35-window system:** batch sizes 1–16 changed 1–3 windows by about one unit in the last place (at most 1.4e-16 relative to the largest entry). Batch sizes of 34 or more were identical.
+- **Batch of one:** XLA compiles it differently, so it is computed as a padded batch of two.
+- **Repeatability:** results repeat exactly for a given `batch_size`, and a `batch_size` of at least the number of windows gives exactly the unbatched result.
+- **Replaying archived results bit-for-bit:** use the same `batch_size` as the original run, or no batching.
+
 ## Recommendation
 - **Keep `storage='observability'` as the default.** It answers every query and is bit-identical to earlier results. After A and B, it needs about one copy of O at its peak and afterwards, and query memory doesn't depend on the number of windows.
 - **Use `'fisher_per_sensor'` for long windows (w > (n+1)/2) when memory matters** and the queries are state or sensor selections with a scalar or per-sensor R. For example, at w = 100 and n = 40 its peak and stored size are 3.5–5× below O's, with the finite-difference builder.
@@ -103,8 +147,9 @@ Setup: 250 samples, 40 states, 66 sensors, a linear system with the finite-diffe
 - **For a per-state λ,** read `fisher_information(states, sensors, R)` and invert F + diag(λ) directly. This works with every storage mode.
 
 ## Remaining limitations
-- **JAX peak:** the JAX backend still computes all windows at once. Its peak is about 1× O plus JAX's own working memory, whatever the storage mode. A future `batch_size` option could process windows in chunks. It would be opt-in, because a different batch size may change results at the last-bit level.
 - **`keep_source=True`:** uses the full builder object, at the 7b69d66 memory cost.
+- **JAX without `batch_size`:** keeps the single batched call, and its ~1.2–2.2× O peak, so that results stay bit-identical to earlier runs by default.
+- **`fisher()`** still builds one `FisherObservability` per window (its API); use `fisher_information()` for speed.
 
 ## API changes
 - **`source` and `window_data`** now require `keep_source=True`; otherwise they raise a `RuntimeError` saying so.
@@ -112,6 +157,7 @@ Setup: 250 samples, 40 states, 66 sensors, a linear system with the finite-diffe
 - **Added:**
   - `storage`, `fisher_sensors`, `keep_source` settings (also saved in YAML);
   - internal streaming hooks on the builder classes (`_prepared`, `_iter_windows`, `_compute`), with their public behavior unchanged;
+  - `batch_size` for `JaxSlidingEmpiricalObservabilityMatrix` and the `'jax'` method;
   - `fisher_information()`;
   - `SlidingO(O=..., index=..., state_names=...)`;
   - `SlidingFisherObservability(keep_windows=...)`.
