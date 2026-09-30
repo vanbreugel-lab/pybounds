@@ -351,11 +351,21 @@ class JaxSlidingEmpiricalObservabilityMatrix:
     z_state_names : list of str, optional
         Names of the states in the new coordinates.
     batch_size : int, optional
-        Compute at most this many windows per batched (vmap) call, instead of all windows at once. This
-        caps JAX's working memory for the Jacobians at about batch_size windows. None (default) batches
-        all windows. Results are repeatable for a given batch_size, but XLA vectorizes across the batch, so
-        a few windows can differ from the unbatched result in the last bit (~1e-16 relative); a batch_size
-        of at least the number of windows gives exactly the unbatched result.
+        Compute at most this many windows per batched (vmap) call. None (default) computes all windows in
+        one call. batch_size trades memory against speed:
+
+        - Memory: JAX's working memory for the Jacobians scales with batch_size, so the peak falls as
+          batch_size gets small relative to the number of windows. A batch close to the number of windows
+          can use more memory than no batching, because the chunks are then copied into separate storage.
+        - Speed: smaller batches mean more calls and a slower run. For example, with 790 windows
+          (40 states, 66 sensors, nonlinear dynamics): 1.5 s unbatched, and 1.7 / 2.0 / 3.0 s at
+          batch_size 128 / 32 / 8, whose peaks were 1.5x / 1.14x / 1.05x one copy of O instead of 2.2x.
+        - Results: repeatable for a given batch_size, but XLA vectorizes across the batch, so a few windows
+          can differ from the unbatched result in the last bit (~1e-16 relative). To replay a run exactly,
+          use the same batch_size (or None).
+
+        A batch_size of a few percent of the number of windows keeps most of the memory saving at a moderate
+        time cost; in general, use the largest batch that fits in memory.
     """
 
     @_with_x64

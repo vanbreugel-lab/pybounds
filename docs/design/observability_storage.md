@@ -130,14 +130,30 @@ Without batching, the JAX builder computes every window in one batched call. For
 | linear | 200 | 2.91 GB | `'observability'` | 3.44 GB (1.18×) | 3.22 GB (1.11×) |
 | linear | 200 | 2.91 GB | `'fisher_per_sensor'` | 3.44 GB (1.18×) | 0.60 GB (0.21×) |
 
-**Speed:** at w = 100, `run()` took 1.2 s unbatched, and 3.0 / 2.0 / 1.7 s with `batch_size` = 8 / 32 / 128, including compilation.
+**Memory versus speed** (nonlinear dynamics, w = 100, 790 windows; `run()` time and process peak):
+
+| Storage | `batch_size` | `run()` | Peak |
+|---|---|---|---|
+| `'observability'` | None | 1.51 s | 3.69 GB (2.21× O) |
+| `'observability'` | 8 | 3.00 s | 1.75 GB (1.05×) |
+| `'observability'` | 32 | 2.03 s | 1.90 GB (1.14×) |
+| `'observability'` | 128 | 1.66 s | 2.56 GB (1.54×) |
+| `'observability'` | 395 | 1.23 s | 4.42 GB (2.65×) |
+| `'fisher_per_sensor'` | None | 1.72 s | 4.04 GB (2.42×) |
+| `'fisher_per_sensor'` | 8 | 3.43 s | 0.42 GB (0.25×) |
+| `'fisher_per_sensor'` | 32 | 2.48 s | 0.57 GB (0.34×) |
+| `'fisher_per_sensor'` | 128 | 2.23 s | 1.24 GB (0.74×) |
+
+- **`batch_size` changes both memory and speed.** Smaller batches lower the peak but add calls: 8 doubles the run time, and 32 adds about 35%.
+- **A batch close to the number of windows can be worse than no batching.** With 395 of 790 windows the peak is 4.42 GB, versus 3.69 GB unbatched, because chunks are copied into separate storage instead of keeping JAX's single buffer.
+- **Choosing a value:** a few percent of the number of windows keeps most of the saving at a moderate time cost. In general, use the largest batch that fits in memory. The default stays `None`.
 
 **Effect on results:**
 - **Windows are independent,** but XLA vectorizes across the batch, so where a window sits in a batch can change its last bit.
 - **40-state system:** every batch size from 1 to 790 gave Jacobians bit-identical to the unbatched run.
 - **2-state, 35-window system:** batch sizes 1–16 changed 1–3 windows by about one unit in the last place (at most 1.4e-16 relative to the largest entry). Batch sizes of 34 or more were identical.
 - **Batch of one:** XLA compiles it differently, so it is computed as a padded batch of two.
-- **Repeatability:** results repeat exactly for a given `batch_size`, and a `batch_size` of at least the number of windows gives exactly the unbatched result.
+- **Repeatability:** results repeat exactly for a given `batch_size`. A `batch_size` of at least the number of windows gives exactly the unbatched result, but with no memory saving.
 - **Replaying archived results bit-for-bit:** use the same `batch_size` as the original run, or no batching.
 
 ## Recommendation

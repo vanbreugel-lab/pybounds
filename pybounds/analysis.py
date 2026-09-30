@@ -470,8 +470,9 @@ class ObservabilityAnalysis:
     :param method_options: options for the chosen method, forwarded to its builder. Only options
         that are given are forwarded, so the builder's own defaults apply otherwise.
         'empirical': eps, parallel_sliding, parallel_perturbation, simulator_factory, n_workers.
-        'jax': batch_size, to compute at most that many windows per batched call and cap JAX's working
-        memory (set integrator/substeps on the JaxSimulator)
+        'jax': batch_size (default None: all windows in one call), to compute at most that many windows per
+        batched call. Smaller batches lower JAX's peak memory but make run() slower, and can change results in
+        the last bit; see JaxSlidingEmpiricalObservabilityMatrix. Set integrator/substeps on the JaxSimulator
 
     Memory: after run() the observability matrices are held once, as one (n_windows, w*p, n) float
     array (8 * n_windows * w * p * n bytes). Queries build one window's data at a time.
