@@ -131,24 +131,25 @@ class TestStorage:
         frames[0].iloc[:, :] = 0.0   # the public copies are writable and don't touch the stored array
         assert np.abs(oa.observability_matrix(0).values).sum() > 0
 
-    def test_builder_objects_are_released(self, monkeypatch):
+    def test_builder_streams_by_default(self, monkeypatch):
+        """By default windows are streamed: no full builder object (with y_plus/y_minus for every window) exists."""
         from pybounds import analysis
         original = analysis._BUILDERS['empirical']
-        native = []
+        results = []
 
         def func(*args, **kwargs):
             result = original.func(*args, **kwargs)
-            native.append(weakref.ref(result.source))
+            results.append(result)
             return result
 
         monkeypatch.setitem(analysis._BUILDERS, 'empirical', analysis._Builder(func, original.options))
         oa = ObservabilityAnalysis(SIM, T, X, U, w=5, eps=1e-4).run()
-        gc.collect()
-        assert native[0]() is None   # the SlidingEmpiricalObservabilityMatrix (and its y_plus/y_minus) is gone
+        assert isinstance(results[0], analysis._WindowStream) and results[0].source is None
         assert oa._source is None and oa._window_data is None
         kept = ObservabilityAnalysis(SIM, T, X, U, w=5, eps=1e-4, keep_source=True).run()
-        gc.collect()
-        assert native[1]() is kept.source
+        assert isinstance(results[1].source, pybounds.SlidingEmpiricalObservabilityMatrix)
+        assert kept.source is results[1].source
+        np.testing.assert_array_equal(kept._O, oa._O)   # same O either way
 
     def test_array_input_is_not_copied(self):
         O_list = _reference(6)
@@ -200,3 +201,50 @@ class _nullcontext:
 
     def __exit__(self, *exc):
         return False
+
+
+def _linear_factory():
+    """Module-level (importable) factory for process-based parallel windows."""
+    return LinearSim(6, 5)
+
+
+class TestStreaming:
+
+    @pytest.mark.parametrize('options', [dict(parallel_sliding=True, simulator_factory=_linear_factory, n_workers=2),
+                                         dict(parallel_sliding=True)])   # processes; threads (custom simulator)
+    def test_parallel_windows_are_identical(self, options):
+        sequential = ObservabilityAnalysis(SIM, T, X, U, w=5, eps=1e-4, R=R_DICT).run()
+        parallel = ObservabilityAnalysis(SIM, T, X, U, w=5, eps=1e-4, R=R_DICT, **options).run()
+        np.testing.assert_array_equal(parallel._O, sequential._O)
+        pd.testing.assert_frame_equal(parallel.min_error_variance(states=['x1']),
+                                      sequential.min_error_variance(states=['x1']), check_exact=True)
+
+    def test_seom_run_is_unchanged(self):
+        """The public class still collects every window, with its window_data."""
+        seom = pybounds.SlidingEmpiricalObservabilityMatrix(SIM, T, X, U, w=5, eps=1e-4)
+        assert len(seom.O_sliding) == len(seom.O_df_sliding) == 36
+        assert set(seom.window_data) == {'t', 'u', 'y', 'y_plus', 'y_minus'}
+        assert len(seom.window_data['y_plus']) == 36
+        oa = ObservabilityAnalysis(SIM, T, X, U, w=5, eps=1e-4).run()
+        for k in (0, 35):
+            np.testing.assert_array_equal(oa._O[k], seom.O_sliding[k])
+
+    @pytest.mark.parametrize('storage', ['observability', 'fisher_per_sensor', 'fisher'])
+    def test_run_peak_memory(self, storage):
+        """run() never holds all windows' builder data: the peak is the stored size plus a few windows."""
+        sim = LinearSim(20, 30)
+        t, x, u = sim.trajectory(120)
+        w = 40
+        oa = ObservabilityAnalysis(sim, t, x, u, w=w, eps=1e-4, R=0.1, storage=storage)
+        gc.collect()
+        tracemalloc.start()
+        before = tracemalloc.get_traced_memory()[0]
+        oa.run()
+        peak = tracemalloc.get_traced_memory()[1] - before
+        tracemalloc.stop()
+        n_windows, n, p = 81, 20, 30
+        stored = {'observability': 8 * n_windows * w * p * n,
+                  'fisher_per_sensor': 8 * n_windows * p * n * (n + 1) // 2,
+                  'fisher': 8 * n_windows * n * (n + 1) // 2}[storage]
+        one_window = 8 * w * p * n
+        assert peak < stored + 12 * one_window + 1_000_000   # the old builder peaked at ~5x O

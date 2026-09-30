@@ -1,7 +1,7 @@
-"""Memory benchmark (tracemalloc): bytes held after run() and peak bytes during a query.
+"""Memory benchmark (tracemalloc): peak bytes during run(), bytes held after it, and peak bytes during a query.
 
 Run with `pytest tests/test_memory_benchmark.py -s` to print the table. Sizes are kept small enough for CI;
-docs/design_notes/observability_storage.md has numbers for a larger system.
+docs/design/observability_storage.md has numbers for a larger system.
 """
 import gc
 import tracemalloc
@@ -24,6 +24,7 @@ def _measure(w, storage):
     tracemalloc.start()
     base = tracemalloc.get_traced_memory()[0]
     oa.run()
+    run_peak = tracemalloc.get_traced_memory()[1] - base
     gc.collect()
     held = tracemalloc.get_traced_memory()[0] - base
 
@@ -40,24 +41,27 @@ def _measure(w, storage):
         peaks[name] = tracemalloc.get_traced_memory()[1] - current
         del result
     tracemalloc.stop()
-    return oa, held, peaks
+    return oa, run_peak, held, peaks
 
 
 @pytest.mark.parametrize('w', [5, 100])
 @pytest.mark.parametrize('storage', ['observability', 'fisher_per_sensor', 'fisher'])
 def test_memory(w, storage):
-    oa, held, peaks = _measure(w, storage)
+    oa, run_peak, held, peaks = _measure(w, storage)
     n_windows, n = N_SAMPLES - w + 1, N_STATES
     O_bytes = 8 * n_windows * w * N_SENSORS * n
     packed = n * (n + 1) // 2
     expected = {'observability': O_bytes,
                 'fisher_per_sensor': 8 * n_windows * N_SENSORS * packed,
                 'fisher': 8 * n_windows * packed}[storage]
-    print(f'\nw={w:<3} storage={storage:<17} O={O_bytes / 1e6:7.2f} MB | held {held / 1e6:7.2f} MB '
+    print(f'\nw={w:<3} storage={storage:<17} O={O_bytes / 1e6:7.2f} MB | run peak {run_peak / 1e6:7.2f} MB '
+          f'| held {held / 1e6:7.2f} MB '
           f'(expected {expected / 1e6:.2f}) | peak min_error_variance {peaks["min_error_variance"] / 1e6:.2f} MB, '
           f'fisher_information {peaks["fisher_information"] / 1e6:.2f} MB')
 
     assert held <= 1.15 * expected + 200_000
+    one_window = 8 * w * N_SENSORS * n
+    assert run_peak <= expected + 12 * one_window + 1_000_000   # windows are streamed into storage
     # a query never needs more than a few windows' worth of O plus the per-window results
     assert peaks['min_error_variance'] < max(0.25 * O_bytes, 4 * w * N_SENSORS * n * 8 + 2_000_000)
     if storage == 'fisher_per_sensor':

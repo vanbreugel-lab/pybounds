@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Callable, NamedTuple
+from typing import Callable, Iterator, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -73,8 +73,22 @@ class SlidingO:
     state_names: list = None
 
 
+@dataclass
+class _WindowStream:
+    """Windows produced one at a time by a builder: iterating `windows` yields (O_k, index, state_names)."""
+    windows: Iterator
+    n_windows: int
+    t_sim: np.ndarray = None
+    O_index: np.ndarray = None
+    w: int = None
+    window_data: dict = None
+    source: object = None
+
+
 class _Builder(NamedTuple):
-    func: Callable          # func(simulator, t_sim, x_sim, u_sim, *, w, **options) -> SlidingO
+    # func(simulator, t_sim, x_sim, u_sim, *, w, stream, **options) -> SlidingO, or a _WindowStream when
+    # stream=True (a builder may also return a SlidingO then, e.g. when it computes all windows at once)
+    func: Callable
     options: frozenset      # option names the builder accepts
 
 
@@ -137,18 +151,41 @@ class _WindowFrames(Sequence):
         return pd.DataFrame(self._O[k], index=self._index, columns=self._state_names, copy=True)
 
 
-def _build_empirical(simulator, t_sim, x_sim, u_sim, *, w, **options):
-    """Finite-difference O from a CasADi/do_mpc (or custom) simulator."""
-    return _from_native(SlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+def _build_empirical(simulator, t_sim, x_sim, u_sim, *, w, stream=False, **options):
+    """Finite-difference O from a CasADi/do_mpc (or custom) simulator.
+
+    With stream=True the windows are computed and handed over one at a time, so all windows' O,
+    perturbed trajectories and DataFrames never exist at once.
+    """
+    if not stream:
+        return _from_native(SlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+    native = SlidingEmpiricalObservabilityMatrix._prepared(simulator, t_sim, x_sim, u_sim, w=w, **options)
+
+    def windows():
+        for O, O_df, _ in native._iter_windows(with_data=False, copy=False):
+            yield O, O_df.index, list(O_df.columns)
+
+    return _WindowStream(windows=windows(), n_windows=native.n_point, t_sim=native.t_sim,
+                         O_index=native.O_index, w=native.w)
 
 
-def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, **options):
-    """Exact (autodiff) O from a JaxSimulator."""
+def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, stream=False, **options):
+    """Exact (autodiff) O from a JaxSimulator.
+
+    All windows are computed in one batched call; with stream=True the resulting array is used directly,
+    without per-window arrays or DataFrames.
+    """
     try:
         from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
     except ImportError:
         raise ImportError("JAX is not installed. Install it with: pip install jax[cpu]") from None
-    return _from_native(JaxSlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+    if not stream:
+        return _from_native(JaxSlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+    native = JaxSlidingEmpiricalObservabilityMatrix._prepared(simulator, t_sim, x_sim, u_sim, w=w, **options)
+    jac_batch, _ = native._compute(copy=False)   # read-only, possibly sharing JAX's buffer: stored as is
+    O = jac_batch.reshape(jac_batch.shape[0], native.w * native.p, native.n)
+    return SlidingO(O=O, index=native._window_frame(O[0]).index, state_names=list(native.state_names),
+                    t_sim=native.t_sim, O_index=native.O_index, w=native.w)
 
 
 _BUILDERS = {
@@ -164,19 +201,20 @@ STORAGE_MODES = ('observability', 'fisher_per_sensor', 'fisher')
 _NEEDS_O = "storage='observability'"
 
 
-def _pack_fisher(O, index, groups):
-    """Unit-noise Fisher information O_g^T O_g of each sensor group g in every window, packed symmetric.
-
-    Returns an array of shape (n_windows, len(groups), n(n+1)/2) holding the upper triangle.
-    """
-    n = O.shape[2]
-    iu = np.triu_indices(n)
+def _group_rows(index, groups):
+    """Row numbers of each sensor group in a window's O."""
     sensor_level = np.asarray(index.get_level_values('sensor'), dtype=object)
-    F = np.empty((O.shape[0], len(groups), len(iu[0])))
-    for j, group in enumerate(groups):
-        O_g = O[:, np.flatnonzero(np.isin(sensor_level, list(group))), :]
-        F[:, j, :] = np.matmul(O_g.transpose(0, 2, 1), O_g)[:, iu[0], iu[1]]
-    return F
+    return [np.flatnonzero(np.isin(sensor_level, list(group))) for group in groups]
+
+
+def _pack_window(O_k, group_rows, iu):
+    """Unit-noise Fisher information O_g^T O_g of each sensor group in one window, packed symmetric:
+    an array of shape (len(groups), n(n+1)/2) holding the upper triangles."""
+    packed = np.empty((len(group_rows), len(iu[0])))
+    for j, rows in enumerate(group_rows):
+        O_g = O_k[rows]
+        packed[j] = (O_g.T @ O_g)[iu]
+    return packed
 
 
 def _unpack_fisher(F_packed, n):
@@ -602,47 +640,50 @@ class ObservabilityAnalysis:
         if self._settings['aux_list'] is not None:
             options['aux_list'] = self._settings['aux_list']
         result = builder.func(self.simulator, self._t_sim_in, self._x_sim_in, self._u_sim_in,
-                              w=self._settings['w'], **options)
+                              w=self._settings['w'], stream=not self._settings['keep_source'], **options)
         self._store(result)
         return self
 
     def _store(self, result):
-        """Keep a builder result as one array, applying the coordinate transform if one is set."""
-        O, index, state_names = _window_array(result)
-        n_windows = O.shape[0]
-        O_index = np.arange(n_windows) if result.O_index is None else np.asarray(result.O_index)
+        """Keep a builder result: the observability matrices as one array, or their Fisher information.
+
+        Windows are consumed one at a time (applying the coordinate transform if one is set), so a
+        streamed result never holds more than one window besides what is stored.
+        """
+        if isinstance(result, _WindowStream):
+            n_windows, windows, materialized = result.n_windows, result.windows, None
+        else:
+            materialized = _window_array(result)
+            O_all, index_all, names_all = materialized
+            n_windows = O_all.shape[0]
+            windows = ((O_all[k], index_all, names_all) for k in range(n_windows))
         if n_windows == 0:
             raise ValueError('the observability matrix builder returned no windows')
+        O_index = np.arange(n_windows) if result.O_index is None else np.asarray(result.O_index)
         if not np.array_equal(O_index, np.arange(n_windows)):
             raise NotImplementedError('only windows starting at every time-step (O_index = 0, 1, 2, ...) are '
                                       'supported for time alignment')
 
-        dxdz_sliding = None
+        storage = self._settings['storage']
         z_function = self._settings['z_function']
-        if z_function is not None:
-            if self._settings['z_state_names'] is None:
-                warnings.warn('z_function is set without z_state_names, so the transformed states are named '
-                              '0, 1, 2, ...', UserWarning, stacklevel=3)
-            O, state_names, dxdz_sliding = self._transform(O, index, state_names, O_index)
+        if z_function is not None and self._settings['z_state_names'] is None:
+            warnings.warn('z_function is set without z_state_names, so the transformed states are named '
+                          '0, 1, 2, ...', UserWarning, stacklevel=3)
+
+        if storage == 'observability' and z_function is None and materialized is not None:
+            O, index, state_names = materialized   # already one array: keep it without a copy
+            dxdz_sliding = None
+        else:
+            O, index, state_names, dxdz_sliding = self._assemble(windows, n_windows, O_index, storage)
 
         self._index = index
         self._n_windows = n_windows
-        storage = self._settings['storage']
         if storage == 'observability':
             O = O.view()
             O.flags.writeable = False   # never modified; also protects an array passed in via SlidingO(O=...)
             self._O = O
         else:
-            sensor_names = list(pd.unique(np.asarray(index.get_level_values('sensor'), dtype=object)))
-            if storage == 'fisher_per_sensor':
-                groups = [[s] for s in sensor_names]
-            else:
-                groups = [list(self._settings['fisher_sensors'] or sensor_names)]
-                unknown = [s for s in groups[0] if s not in sensor_names]
-                if unknown:
-                    raise ValueError(f'unknown fisher_sensors {unknown}; available sensors: {sensor_names}')
-            self._F = _pack_fisher(O, index, groups)
-            self._F_groups = groups
+            self._F = O
             self._O = None
         self._state_names = state_names
         self._dxdz_sliding = dxdz_sliding
@@ -656,22 +697,58 @@ class ObservabilityAnalysis:
         self._window_data = result.window_data if keep else None
         self.clear_cache()
 
-    def _transform(self, O, index, state_names, O_index):
-        """Transform every window to z coordinates at its initial state, one window at a time."""
-        x0_list = self._trajectory_states(O.shape[2])[O_index]
+    def _assemble(self, windows, n_windows, O_index, storage):
+        """Consume (O_k, index, state_names) windows into the stored array (O, or packed Fisher information)."""
+        z_function = self._settings['z_function']
+        out = index0 = names0 = state_names = None
+        dxdz_sliding = [] if z_function is not None else None
+        count = 0
+        for k, (O_k, index, names) in enumerate(windows):
+            if k == 0:
+                index0, names0 = index, list(names)
+                if list(index0.names) != ['sensor', 'time_step']:
+                    raise ValueError(f"the row index names must be ['sensor', 'time_step'], got {list(index0.names)}")
+                n = O_k.shape[1]
+                if z_function is not None:
+                    x0_list = self._trajectory_states(n)[O_index]
+                if storage == 'observability':
+                    out = np.empty((n_windows, O_k.shape[0], n))
+                else:
+                    sensor_names = list(pd.unique(np.asarray(index0.get_level_values('sensor'), dtype=object)))
+                    if storage == 'fisher_per_sensor':
+                        groups = [[s] for s in sensor_names]
+                    else:
+                        groups = [list(self._settings['fisher_sensors'] or sensor_names)]
+                        unknown = [s for s in groups[0] if s not in sensor_names]
+                        if unknown:
+                            raise ValueError(f'unknown fisher_sensors {unknown}; available sensors: {sensor_names}')
+                    self._F_groups = groups
+                    group_rows = _group_rows(index0, groups)
+                    iu = np.triu_indices(n)
+                    out = np.empty((n_windows, len(groups), len(iu[0])))
+            elif not index.equals(index0) or list(names) != names0:
+                raise ValueError(f'window {k} has different rows or states than window 0; '
+                                 'all windows must share the same rows and states')
+
+            if z_function is not None:
+                O_k, state_names, dxdz = self._transform_window(O_k, index0, names0, x0_list[k])
+                dxdz_sliding.append(dxdz)
+            if storage == 'observability':
+                out[k] = O_k
+            else:
+                out[k] = _pack_window(O_k, group_rows, iu)
+            count += 1
+        if count != n_windows:
+            raise ValueError(f'the builder produced {count} windows, expected {n_windows}')
+        return out, index0, state_names if z_function is not None else names0, dxdz_sliding
+
+    def _transform_window(self, O_k, index, state_names, x0):
+        """One window in z coordinates at its initial state: (O_z, z state names, dx/dz)."""
         if self._dzdx_function is None:
-            self._dzdx_function = _z_jacobian_function(self._settings['z_function'], O.shape[2])
-        dzdx_function = self._dzdx_function
-        O_z = np.empty_like(O)
-        dxdz_sliding = []
-        z_names = None
-        for k in range(O.shape[0]):
-            frame = pd.DataFrame(O[k], index=index, columns=state_names, copy=True)
-            frame_z, dxdz = _transform_O_df(frame, x0_list[k], dzdx_function, self._settings['z_state_names'])
-            O_z[k] = frame_z.to_numpy(dtype=float)
-            dxdz_sliding.append(dxdz)
-            z_names = list(frame_z.columns)
-        return O_z, z_names, dxdz_sliding
+            self._dzdx_function = _z_jacobian_function(self._settings['z_function'], O_k.shape[1])
+        frame = pd.DataFrame(O_k, index=index, columns=state_names, copy=True)
+        frame_z, dxdz = _transform_O_df(frame, x0, self._dzdx_function, self._settings['z_state_names'])
+        return frame_z.to_numpy(dtype=float), list(frame_z.columns), dxdz
 
     def _trajectory_states(self, n):
         """x_sim as an (N, n) array, in the simulator's state order."""
@@ -959,9 +1036,11 @@ class ObservabilityAnalysis:
         result = _BUILDERS[self.method].func(self.simulator, np.ravel(np.asarray(self._t_sim_in))[rows],
                                              cut(self._x_sim_in), cut(self._u_sim_in), w=self._w, **options)
         O, index, state_names = _window_array(result)
+        O_k = O[0]
         if self._settings['z_function'] is not None:
-            O, state_names, _ = self._transform(O, index, state_names, np.array([k]))
-        return pd.DataFrame(O[0], index=index, columns=state_names, copy=True)
+            x0 = self._trajectory_states(O_k.shape[1])[k]
+            O_k, state_names, _ = self._transform_window(O_k, index, state_names, x0)
+        return pd.DataFrame(O_k, index=index, columns=state_names, copy=True)
 
     def plot_observability_matrix(self, window=0, states=None, sensors=None, time_steps=None, *,
                                   state_names=None, sensor_names=None, **plot_kwargs):
