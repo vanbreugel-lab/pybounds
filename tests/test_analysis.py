@@ -333,11 +333,17 @@ class TestCaching:
     def test_cache_hits(self, oa_fresh, monkeypatch):
         oa_fresh.min_error_variance(states=['d'])
         calls = []
-        monkeypatch.setattr(oa_fresh, '_sliding_fisher', lambda *a, **k: calls.append(1))
+
+        def computed(*args, **kwargs):
+            calls.append(1)
+            raise RuntimeError('recomputed')
+
+        monkeypatch.setattr(oa_fresh, '_fast_windows', computed)
+        monkeypatch.setattr(oa_fresh, '_sliding_fisher', computed)
         oa_fresh.min_error_variance(states=['d'])
         assert calls == []
         oa_fresh.clear_cache()
-        with pytest.raises(AttributeError):   # the stubbed computation is called again after clearing
+        with pytest.raises(RuntimeError, match='recomputed'):   # computed again after clearing
             oa_fresh.min_error_variance(states=['d'])
 
 

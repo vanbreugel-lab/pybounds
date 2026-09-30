@@ -136,6 +136,59 @@ def _window_array(sliding):
     return O, index, state_names
 
 
+class _FastWindows:
+    """Per-window Fisher information and error variance straight from the stored O array.
+
+    Reproduces FisherObservability for a scalar, dict or None R: the same selected rows and columns, laid out
+    in Fortran order as FisherObservability's DataFrame gives them, and the same 2-D matrix products and
+    inversion, so results are bit-identical, without per-window pandas indexing.
+    """
+
+    def __init__(self, analysis, rows, cols, reference, lam):
+        self._analysis, self._rows, self._cols, self._lam = analysis, rows, cols, lam
+        self._columns = reference.O.columns
+        if reference._R_diag is None:   # force_R_scalar: F = R_inv * (O^T O)
+            self._scale, self._r_inv = reference.R_inv.values.squeeze(), None
+        else:                            # diagonal R: F = (O^T * r_inv) @ O
+            self._scale, self._r_inv = None, 1 / reference._R_diag
+
+    def _O(self, k):
+        return np.asfortranarray(self._analysis._O[k][np.ix_(self._rows, self._cols)])
+
+    def fisher(self, k):
+        O_values = self._O(k)
+        if self._r_inv is None:
+            return self._scale * (O_values.T @ O_values)
+        return np.ascontiguousarray(O_values.T * self._r_inv) @ O_values
+
+    def error_variance_row(self, k):
+        F = pd.DataFrame(self.fisher(k), index=self._columns, columns=self._columns)
+        return np.diag(_fisher_inverse(F.values, self._lam))
+
+    def fisher_information(self):
+        n_windows = self._analysis._n_windows
+        return np.stack([pd.DataFrame(self.fisher(k), index=self._columns, columns=self._columns).to_numpy()
+                         for k in range(n_windows)])
+
+    def error_variance(self):
+        """Aligned error variance, as SlidingFisherObservability(...).get_minimum_error_variance() returns it."""
+        a = self._analysis
+        n_window = a._n_windows
+        if a._t_sim is None:
+            time, dt = np.arange(0, n_window, step=1), 1
+        else:
+            time = np.array(a._t_sim)
+            dt = np.mean(np.diff(time)) if len(time) > 1 else 0.0
+        rows = []
+        for k in range(n_window):
+            ev = pd.DataFrame(self.error_variance_row(k), index=self._columns).T
+            ev.insert(0, 'time_initial', time[k])
+            rows.append(ev)
+        shift_index = a._w // 2
+        return _align_error_variance(pd.concat(rows, axis=0, ignore_index=True), time, shift_index,
+                                     shift_index * dt, aligned=n_window > 1 or a._t_sim is not None)[1]
+
+
 class _WindowFrames(Sequence):
     """Read-only sequence of per-window DataFrames, built on access from one stored array."""
 
@@ -927,8 +980,12 @@ class ObservabilityAnalysis:
             return self._cache[key].copy()
 
         if self._O is not None:
-            ev = self._sliding_fisher(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar,
-                                      keep_windows=False).get_minimum_error_variance()
+            fast = self._fast_windows(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar)
+            if fast is not None:
+                ev = fast.error_variance()
+            else:   # matrix R, or a selection the fast path doesn't reproduce exactly
+                ev = self._sliding_fisher(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar,
+                                          keep_windows=False).get_minimum_error_variance()
         else:
             ev = self._stored_fisher_error_variance(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar)
         if cacheable:
@@ -946,9 +1003,45 @@ class ObservabilityAnalysis:
         R, _ = self._resolve(R, _UNSET, sensors)
         if self._O is None:
             return self._stored_fisher(states, sensors, None, R, force_R_scalar)
+        fast = self._fast_windows(states, sensors, None, R, DEFAULT_LAM, force_R_scalar)
+        if fast is not None:
+            return fast.fisher_information()
         frames = self._frames()
         return np.stack([FisherObservability(frames[k], R=R, force_R_scalar=force_R_scalar, states=states,
                                              sensors=sensors).F.to_numpy() for k in range(self._n_windows)])
+
+    def _fast_windows(self, states, sensors, time_steps, R, lam, force_R_scalar):
+        """_FastWindows for a query with storage='observability', or None to use FisherObservability per window.
+
+        All windows share one row index, so the selected rows (in FisherObservability's order), columns and
+        noise weights are computed once. Window 0 is computed both ways; any difference falls back.
+        """
+        if _is_matrix(R):
+            return None
+        frames = self._frames()
+        reference = FisherObservability(frames[0], R=R, lam=lam, force_R_scalar=force_R_scalar, states=states,
+                                        sensors=sensors, time_steps=None if time_steps is None else np.array(time_steps))
+        sensor_level = np.asarray(self._index.get_level_values('sensor'), dtype=object)
+        step_level = np.asarray(self._index.get_level_values('time_step'))
+        mask = np.ones(len(self._index), dtype=bool)
+        if sensors is not None:
+            mask &= np.isin(sensor_level, list(sensors))
+        if time_steps is not None:
+            mask &= np.isin(step_level, list(time_steps))
+        rows = np.flatnonzero(mask)
+        rows = rows[np.lexsort((sensor_level[rows], step_level[rows]))]   # sort_values(['time_step', 'sensor'])
+        cols = np.arange(len(self._state_names)) if states is None else \
+            np.array([self._state_names.index(x) for x in states])
+        if not (self._index[rows].equals(reference.O.index)
+                and list(reference.O.columns) == [self._state_names[c] for c in cols]):
+            return None
+        fast = _FastWindows(self, rows, cols, reference, lam)
+        if not (np.array_equal(fast.fisher(0), reference.F.to_numpy())
+                and np.array_equal(fast.error_variance_row(0), reference.error_variance.to_numpy()[0])):
+            return None
+        return fast
+
+
 
     def _stored_fisher(self, states, sensors, time_steps, R, force_R_scalar):
         """Selected F of every window from the stored per-sensor / summed Fisher information."""
