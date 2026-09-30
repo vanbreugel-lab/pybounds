@@ -222,19 +222,33 @@ def _build_empirical(simulator, t_sim, x_sim, u_sim, *, w, stream=False, **optio
                          O_index=native.O_index, w=native.w)
 
 
-def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, stream=False, **options):
+def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, stream=False, batch_size=None, **options):
     """Exact (autodiff) O from a JaxSimulator.
 
-    All windows are computed in one batched call; with stream=True the resulting array is used directly,
-    without per-window arrays or DataFrames.
+    Without batch_size, all windows are computed in one batched call and, with stream=True, the resulting
+    array is used directly, without per-window arrays or DataFrames. With batch_size, chunks of that many
+    windows are computed and streamed one window at a time.
     """
     try:
         from .jax_simulator import JaxSlidingEmpiricalObservabilityMatrix
     except ImportError:
         raise ImportError("JAX is not installed. Install it with: pip install jax[cpu]") from None
     if not stream:
-        return _from_native(JaxSlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w, **options))
+        return _from_native(JaxSlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w,
+                                                                   batch_size=batch_size, **options))
     native = JaxSlidingEmpiricalObservabilityMatrix._prepared(simulator, t_sim, x_sim, u_sim, w=w, **options)
+    if batch_size is not None:
+        rows, n = native.w * native.p, native.n
+        index = native._window_frame(np.zeros((rows, n))).index
+        state_names = list(native.state_names)
+
+        def windows():
+            for _, jac, _ in native._iter_chunks(batch_size):
+                for jac_k in jac:
+                    yield jac_k.reshape(rows, n), index, state_names
+
+        return _WindowStream(windows=windows(), n_windows=len(native.O_index), t_sim=native.t_sim,
+                             O_index=native.O_index, w=native.w)
     jac_batch, _ = native._compute(copy=False)   # read-only, possibly sharing JAX's buffer: stored as is
     O = jac_batch.reshape(jac_batch.shape[0], native.w * native.p, native.n)
     return SlidingO(O=O, index=native._window_frame(O[0]).index, state_names=list(native.state_names),
@@ -244,7 +258,7 @@ def _build_jax(simulator, t_sim, x_sim, u_sim, *, w, stream=False, **options):
 _BUILDERS = {
     'empirical': _Builder(_build_empirical, frozenset({'aux_list', 'eps', 'parallel_sliding', 'parallel_perturbation',
                                                        'simulator_factory', 'n_workers'})),
-    'jax': _Builder(_build_jax, frozenset({'aux_list'})),
+    'jax': _Builder(_build_jax, frozenset({'aux_list', 'batch_size'})),
 }
 
 
@@ -456,7 +470,8 @@ class ObservabilityAnalysis:
     :param method_options: options for the chosen method, forwarded to its builder. Only options
         that are given are forwarded, so the builder's own defaults apply otherwise.
         'empirical': eps, parallel_sliding, parallel_perturbation, simulator_factory, n_workers.
-        'jax': none (set integrator/substeps on the JaxSimulator)
+        'jax': batch_size, to compute at most that many windows per batched call and cap JAX's working
+        memory (set integrator/substeps on the JaxSimulator)
 
     Memory: after run() the observability matrices are held once, as one (n_windows, w*p, n) float
     array (8 * n_windows * w * p * n bytes). Queries build one window's data at a time.
