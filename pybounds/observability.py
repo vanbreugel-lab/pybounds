@@ -62,7 +62,7 @@ def _check_spawn_picklable(obj, name):
 def _compute_window(args):
     """Compute EmpiricalObservabilityMatrix for a single window (called in worker)."""
     global _process_simulator
-    n, O_index, x_sim, u_sim, t_sim, N, w, eps, aux_list, z_function, z_state_names = args
+    n, O_index, x_sim, u_sim, t_sim, N, w, eps, aux_list, z_function, z_state_names, with_data = args
 
     x0 = np.squeeze(x_sim[O_index[n], :])
     win = np.arange(O_index[n], O_index[n] + w, step=1)
@@ -75,13 +75,29 @@ def _compute_window(args):
                                        parallel=False,
                                        z_function=z_function,
                                        z_state_names=z_state_names)
-    window_data = {
-        't': t_win.copy(), 'u': u_win.copy(),
-        'y': EOM.y_nominal.copy(),
-        'y_plus': EOM.y_plus.copy(),
-        'y_minus': EOM.y_minus.copy(),
-    }
+    window_data = None
+    if with_data:
+        window_data = {
+            't': t_win.copy(), 'u': u_win.copy(),
+            'y': EOM.y_nominal.copy(),
+            'y_plus': EOM.y_plus.copy(),
+            'y_minus': EOM.y_minus.copy(),
+        }
     return EOM.O.copy(), EOM.O_df.copy(), window_data
+
+
+def _ordered_thread_map(fn, items, max_workers, max_in_flight):
+    """Like ThreadPoolExecutor.map, in order, but with at most max_in_flight unconsumed results."""
+    from collections import deque
+    items = iter(items)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        pending = deque()
+        for item in items:
+            pending.append(executor.submit(fn, item))
+            if len(pending) >= max_in_flight:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
 
 
 def _reject_jax_simulator(simulator, cls_name):
@@ -330,6 +346,16 @@ class SlidingEmpiricalObservabilityMatrix:
         :param int n_workers: number of worker processes for process-based parallelism.
             Defaults to min(n_windows, os.cpu_count()).
         """
+        self._prepare(simulator, t_sim, x_sim, u_sim, aux_list=aux_list, w=w, eps=eps,
+                      parallel_sliding=parallel_sliding, parallel_perturbation=parallel_perturbation,
+                      simulator_factory=simulator_factory, n_workers=n_workers,
+                      z_function=z_function, z_state_names=z_state_names)
+        self.run()
+
+    def _prepare(self, simulator, t_sim, x_sim, u_sim, aux_list=None, w=None, eps=1e-5,
+                 parallel_sliding=False, parallel_perturbation=False,
+                 simulator_factory=None, n_workers=None,
+                 z_function=None, z_state_names=None):
 
         _reject_jax_simulator(simulator, 'SlidingEmpiricalObservabilityMatrix')
         self.simulator = simulator
@@ -396,10 +422,14 @@ class SlidingEmpiricalObservabilityMatrix:
         self.window_data = {}
         self.O_sliding = []
         self.O_df_sliding = []
-
-        # Run
         self.EOM = None
-        self.run()
+
+    @classmethod
+    def _prepared(cls, *args, **kwargs):
+        """Validated inputs, ready to compute windows, without computing any (used to stream windows)."""
+        self = cls.__new__(cls)
+        self._prepare(*args, **kwargs)
+        return self
 
     def run(self, parallel_sliding=None):
         """ Run.
@@ -413,13 +443,25 @@ class SlidingEmpiricalObservabilityMatrix:
         self.O_sliding = []
         self.O_df_sliding = []
 
+        for O_sliding, O_df_sliding, window_data in self._iter_windows(with_data=True, copy=True):
+            self.O_sliding.append(O_sliding)
+            self.O_df_sliding.append(O_df_sliding)
+            for k in self.window_data.keys():
+                self.window_data[k].append(window_data[k])
+
+    def _iter_windows(self, with_data=True, copy=True):
+        """Yield (O, O_df, window_data) for each window in order, computing one window at a time.
+
+        :param bool with_data: also build each window's trajectory data (window_data is None otherwise)
+        :param bool copy: return copies of O and O_df (not needed when each window is consumed and dropped)
+        """
         # Threads sharing one pybounds Simulator corrupt each other's CasADi/IDAS runs
         if self.parallel_sliding and self.simulator_factory is None and isinstance(self.simulator, Simulator):
             warnings.warn(
                 'parallel_sliding=True without simulator_factory is not thread-safe with pybounds.Simulator '
                 '(CasADi/IDAS); running windows sequentially instead. '
                 'Pass simulator_factory=<callable> to use process-based parallelism.',
-                RuntimeWarning, stacklevel=2)
+                RuntimeWarning, stacklevel=3)
             self.parallel_sliding = False
 
         # Construct O's
@@ -432,44 +474,29 @@ class SlidingEmpiricalObservabilityMatrix:
                 _check_spawn_picklable(self.simulator_factory, 'simulator_factory')
                 _check_spawn_picklable(self.z_function, 'z_function')
                 n_workers = self.n_workers or min(self.n_point, os.cpu_count() or 1)
-                args_list = [
-                    (n, self.O_index, self.x_sim, self.u_sim, self.t_sim,
-                     self.N, self.w, self.eps, self.aux_list,
-                     self.z_function, self.z_state_names)
-                    for n in n_point_range
-                ]
+                args_iter = ((n, self.O_index, self.x_sim, self.u_sim, self.t_sim,
+                              self.N, self.w, self.eps, self.aux_list,
+                              self.z_function, self.z_state_names, with_data)
+                             for n in n_point_range)
                 ctx = multiprocessing.get_context('spawn')
                 with ctx.Pool(processes=n_workers,
                               initializer=_pool_initializer,
                               initargs=(self.simulator_factory,)) as pool:
-                    results = pool.map(_compute_window, args_list)
-
-                for r in results:
-                    self.O_sliding.append(r[0])
-                    self.O_df_sliding.append(r[1])
-                    for k in self.window_data.keys():
-                        self.window_data[k].append(r[2][k])
+                    yield from pool.imap(_compute_window, args_iter)   # in order, as windows finish
 
             else:
                 # ---- Thread-based parallelism, only reached for custom (thread-safe) simulators ----
-                with ThreadPoolExecutor(max_workers=12) as executor:
-                    results = list(executor.map(self.construct, n_point_range))
-
-                for r in results:
-                    self.O_sliding.append(r[0])
-                    self.O_df_sliding.append(r[1])
-                    for k in self.window_data.keys():
-                        self.window_data[k].append(r[2][k])
+                yield from _ordered_thread_map(lambda n: self._window(n, with_data, copy), n_point_range,
+                                               max_workers=12, max_in_flight=24)
 
         else:
             for n in n_point_range:  # each point on trajectory
-                O_sliding, O_df_sliding, window_data = self.construct(n)
-                self.O_sliding.append(O_sliding)
-                self.O_df_sliding.append(O_df_sliding)
-                for k in self.window_data.keys():
-                    self.window_data[k].append(window_data[k])
+                yield self._window(n, with_data, copy)
 
     def construct(self, n):
+        return self._window(n, with_data=True, copy=True)
+
+    def _window(self, n, with_data=True, copy=True):
         # Start simulation at point along nominal trajectory
         x0 = np.squeeze(self.x_sim[self.O_index[n], :])  # get state on trajectory & set it as the initial condition
 
@@ -495,14 +522,16 @@ class SlidingEmpiricalObservabilityMatrix:
         self.EOM = EOM
 
         # Store data
-        O_sliding = EOM.O.copy()
-        O_df_sliding = EOM.O_df.copy()
+        O_sliding = EOM.O.copy() if copy else EOM.O
+        O_df_sliding = EOM.O_df.copy() if copy else EOM.O_df
 
-        window_data = {'t': t_win.copy(),
-                       'u': u_win.copy(),
-                       'y': EOM.y_nominal.copy(),
-                       'y_plus': EOM.y_plus.copy(),
-                       'y_minus': EOM.y_minus.copy()}
+        window_data = None
+        if with_data:
+            window_data = {'t': t_win.copy(),
+                           'u': u_win.copy(),
+                           'y': EOM.y_nominal.copy(),
+                           'y_plus': EOM.y_plus.copy(),
+                           'y_minus': EOM.y_minus.copy()}
 
         return O_sliding, O_df_sliding, window_data
 

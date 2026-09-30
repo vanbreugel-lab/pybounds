@@ -355,6 +355,19 @@ class JaxSlidingEmpiricalObservabilityMatrix:
     @_with_x64
     def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w=None, aux_list=None,
                  z_function=None, z_state_names=None):
+        self._prepare(jax_simulator, t_sim, x_sim, u_sim, w=w, aux_list=aux_list)
+        jac_batch, y_batch = self._compute()
+        self._build_windows(jac_batch, y_batch, z_function, z_state_names)
+
+    @classmethod
+    def _prepared(cls, *args, **kwargs):
+        """Validated, batched inputs without computing anything (used to get O as one array)."""
+        self = cls.__new__(cls)
+        self._prepare(*args, **kwargs)
+        return self
+
+    @_with_x64
+    def _prepare(self, jax_simulator, t_sim, x_sim, u_sim, w=None, aux_list=None):
         _require_jax_simulator(jax_simulator, 'JaxSlidingEmpiricalObservabilityMatrix')
         self.jax_simulator = jax_simulator
         self.n = jax_simulator.n
@@ -404,6 +417,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
             np.stack([x_arr[i] for i in self.O_index]), dtype=jnp.float64)
         u_batch = jnp.array(
             np.stack([u_arr[i:i + w] for i in self.O_index]), dtype=jnp.float64)
+        self._u_arr = u_arr
 
         # Batch aux over windows: window i uses aux_list[i], as in SlidingEmpiricalObservabilityMatrix
         self.aux_list = aux_list
@@ -420,13 +434,24 @@ class JaxSlidingEmpiricalObservabilityMatrix:
                 raise ValueError('aux_list entries must all have the same structure and array shapes '
                                  'so they can be batched across windows') from e
             aux_axis = 0
+        self._batch = (x0_batch, u_batch, aux_batch, aux_axis)
 
-        sim = jax_simulator._simulate_jax
+    @_with_x64
+    def _compute(self, copy=True):
+        """Jacobian (n_windows, w, p, n) and nominal trajectory (n_windows, w, p) of every window.
+
+        With copy=False the Jacobian may share JAX's result buffer (read-only), avoiding a second full copy.
+        """
+        x0_batch, u_batch, aux_batch, aux_axis = self._batch
+        n_windows = len(self.O_index)
+        sim = self.jax_simulator._simulate_jax
 
         # Single vmapped jacfwd call — one XLA kernel for all windows
         vmapped_jac = jax.jit(
             jax.vmap(jax.jacfwd(sim, argnums=0), in_axes=(0, 0, aux_axis)))
-        jac_batch = np.array(vmapped_jac(x0_batch, u_batch, aux_batch))  # (n_windows, w, p, n)
+        jac_result = vmapped_jac(x0_batch, u_batch, aux_batch)
+        jac_batch = np.array(jac_result) if copy else np.asarray(jac_result)  # (n_windows, w, p, n)
+        del jac_result
 
         # Nominal trajectories for all windows
         vmapped_sim = jax.jit(jax.vmap(sim, in_axes=(0, 0, aux_axis)))
@@ -435,10 +460,20 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         bad = ~(np.isfinite(jac_batch).all(axis=(1, 2, 3)) & np.isfinite(y_batch).all(axis=(1, 2)))
         if bad.any():
             _warn_nonfinite(f'JaxSlidingEmpiricalObservabilityMatrix ({bad.sum()} of {n_windows} windows)')
+        return jac_batch, y_batch
 
-        # Build O_df_sliding list (same format as SlidingEmpiricalObservabilityMatrix)
-        measurement_labels = self.measurement_names * w
-        time_labels = np.repeat(np.arange(w), self.p).astype(int)
+    def _window_frame(self, O_i):
+        """One window's O as a DataFrame (same format as SlidingEmpiricalObservabilityMatrix)."""
+        O_df_i = pd.DataFrame(O_i, columns=self.state_names, index=self.measurement_names * self.w)
+        O_df_i['time_step'] = np.repeat(np.arange(self.w), self.p).astype(int)
+        O_df_i = O_df_i.set_index('time_step', append=True)
+        O_df_i.index.names = ['sensor', 'time_step']
+        return O_df_i
+
+    def _build_windows(self, jac_batch, y_batch, z_function, z_state_names):
+        """Per-window O arrays and DataFrames, window_data, and the optional coordinate transform."""
+        w, u_arr, x0_batch = self.w, self._u_arr, self._batch[0]
+        n_windows = len(self.O_index)
 
         self.O_sliding = []
         self.O_df_sliding = []
@@ -458,12 +493,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
             self.window_data['u'].append(u_arr[win].copy())
             self.window_data['y'].append(y_batch[i].copy())
 
-            O_df_i = pd.DataFrame(O_i, columns=self.state_names,
-                                  index=measurement_labels)
-            O_df_i['time_step'] = time_labels
-            O_df_i = O_df_i.set_index('time_step', append=True)
-            O_df_i.index.names = ['sensor', 'time_step']
-            self.O_df_sliding.append(O_df_i)
+            self.O_df_sliding.append(self._window_frame(O_i))
 
         # Perform coordinate transformation on each window's O, if specified
         if z_function is not None:
