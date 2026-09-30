@@ -620,15 +620,7 @@ class FisherObservability:
             self.lam = lam
 
         # Invert F
-        if self.lam == 'limit':  # calculate limit with symbolic sigma
-            sigma_sym = sp.symbols('sigma')
-            F_hat = self.F.values + sp.Matrix(sigma_sym * np.eye(self.n))
-            F_hat_inv = F_hat.inv()
-            F_hat_inv_limit = F_hat_inv.applyfunc(lambda elem: sp.limit(elem, sigma_sym, 0))
-            self.F_inv = np.array(F_hat_inv_limit, dtype=np.float64)
-        else:  # numeric sigma
-            F_epsilon = self.F.values + (self.lam * np.eye(self.n))
-            self.F_inv = np.linalg.inv(F_epsilon)
+        self.F_inv = _fisher_inverse(self.F.values, self.lam)
 
         self.F_inv = pd.DataFrame(self.F_inv, index=self.O.columns, columns=self.O.columns)
 
@@ -770,21 +762,43 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
-        # Shift the time forward by half the window size. Floor division puts odd windows at their center
-        # time-step (w-1)/2; np.round's banker's rounding gave 2, 2, 4, 4 for w = 3, 5, 7, 9.
         self.shift_index = int(FO.w) // 2
         self.shift_time = self.shift_index * self.dt
-        self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
-        if self.n_window > 1 or time is not None:  # align windows with the time vector
-            self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
-            time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
-            self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
-        else:  # single window without a time vector: time in units of time-steps
-            self.EV_aligned = self.EV.copy()
-            self.EV_aligned.insert(0, 'time', self.EV['time_initial'] + self.shift_time)
+        self.EV, self.EV_aligned = _align_error_variance(pd.concat(self.EV, axis=0, ignore_index=True),
+                                                         self.time, self.shift_index, self.shift_time,
+                                                         aligned=self.n_window > 1 or time is not None)
 
     def get_minimum_error_variance(self):
         return self.EV_aligned.copy()
+
+
+def _fisher_inverse(F, lam):
+    """(F + lam*I)^-1 for an (n, n) array F; lam='limit' takes lam -> 0 symbolically."""
+    n = F.shape[0]
+    if lam == 'limit':  # calculate limit with symbolic sigma
+        sigma_sym = sp.symbols('sigma')
+        F_hat = F + sp.Matrix(sigma_sym * np.eye(n))
+        F_hat_inv = F_hat.inv()
+        F_hat_inv_limit = F_hat_inv.applyfunc(lambda elem: sp.limit(elem, sigma_sym, 0))
+        return np.array(F_hat_inv_limit, dtype=np.float64)
+    F_epsilon = F + (lam * np.eye(n))  # numeric sigma
+    return np.linalg.inv(F_epsilon)
+
+
+def _align_error_variance(EV, time, shift_index, shift_time, aligned):
+    """Place one row per window (columns 'time_initial' + states) on the trajectory's time axis.
+
+    Each window is shifted forward by half its size (floor division puts odd windows at their center
+    time-step (w-1)/2). Returns (EV with the shifted index, EV_aligned with a 'time' column).
+    """
+    if aligned:  # align windows with the time vector
+        EV.index = np.arange(shift_index, EV.shape[0] + shift_index, step=1, dtype=int)
+        time_df = pd.DataFrame(np.atleast_2d(time).T, columns=['time'])
+        return EV, pd.concat((time_df, EV), axis=1)
+    # single window without a time vector: time in units of time-steps
+    EV_aligned = EV.copy()
+    EV_aligned.insert(0, 'time', EV['time_initial'] + shift_time)
+    return EV, EV_aligned
 
 
 def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_state_names=None):

@@ -24,7 +24,8 @@ import pandas as pd
 import yaml
 
 from .observability import (DEFAULT_LAM, SlidingEmpiricalObservabilityMatrix, SlidingFisherObservability,
-                            ObservabilityMatrixImage, _ordered_values, _transform_O_df, _z_jacobian_function)
+                            FisherObservability, ObservabilityMatrixImage, _ordered_values, _transform_O_df,
+                            _z_jacobian_function, _fisher_inverse, _align_error_variance)
 
 
 class _Unset:
@@ -155,6 +156,40 @@ _BUILDERS = {
                                                        'simulator_factory', 'n_workers'})),
     'jax': _Builder(_build_jax, frozenset({'aux_list'})),
 }
+
+
+STORAGE_MODES = ('observability', 'fisher_per_sensor', 'fisher')
+
+# What each storage mode can answer after run(), for error messages
+_NEEDS_O = "storage='observability'"
+
+
+def _pack_fisher(O, index, groups):
+    """Unit-noise Fisher information O_g^T O_g of each sensor group g in every window, packed symmetric.
+
+    Returns an array of shape (n_windows, len(groups), n(n+1)/2) holding the upper triangle.
+    """
+    n = O.shape[2]
+    iu = np.triu_indices(n)
+    sensor_level = np.asarray(index.get_level_values('sensor'), dtype=object)
+    F = np.empty((O.shape[0], len(groups), len(iu[0])))
+    for j, group in enumerate(groups):
+        O_g = O[:, np.flatnonzero(np.isin(sensor_level, list(group))), :]
+        F[:, j, :] = np.matmul(O_g.transpose(0, 2, 1), O_g)[:, iu[0], iu[1]]
+    return F
+
+
+def _unpack_fisher(F_packed, n):
+    """(n_windows, n(n+1)/2) packed upper triangles -> (n_windows, n, n) symmetric matrices."""
+    iu = np.triu_indices(n)
+    F = np.zeros((F_packed.shape[0], n, n))
+    F[:, iu[0], iu[1]] = F_packed
+    F[:, iu[1], iu[0]] = F_packed
+    return F
+
+
+def _is_matrix(R):
+    return isinstance(R, pd.DataFrame) or (isinstance(R, np.ndarray) and R.ndim == 2)
 
 
 def _is_jax_simulator(simulator):
@@ -311,6 +346,19 @@ class ObservabilityAnalysis:
         None means identity
     :param float | str lam: default regularization for inverting F; 1/lam is the ceiling on the
         minimum error variance. 'limit' computes lam -> 0 symbolically
+    :param str storage: what run() keeps (default 'observability'):
+        'observability' keeps every window's O and can answer every query (selections of states, sensors
+        and time_steps; any R including matrices; the observability matrices themselves).
+        'fisher_per_sensor' keeps one unit-noise Fisher information matrix per sensor per window (packed
+        symmetric, n(n+1)/2 numbers each) and discards O: it answers selections of states and sensors with a
+        scalar or per-sensor (dict) R, but not time_steps selections or matrix R. It is smaller than O when
+        (n+1)/2 < w, i.e. for long windows.
+        'fisher' keeps one Fisher information matrix per window, summed over fisher_sensors with unit noise:
+        the smallest, but only states can be selected and R must be a scalar.
+        In the Fisher modes, z_function is applied to O before F is formed, and observability_matrix(k)
+        recomputes that one window's O on demand. Results agree with 'observability' to rounding error
+        (different summation order), which inversion amplifies by up to the condition number of F + lam*I
+    :param list fisher_sensors: sensors summed into F with storage='fisher' (default: all)
     :param bool keep_source: keep the builder's native object (``source``) and its per-window trajectory
         data (``window_data``) after run(). Off by default because they hold extra copies of O (and, for
         'empirical', the perturbed simulations), several times the memory of O itself
@@ -323,12 +371,13 @@ class ObservabilityAnalysis:
     array (8 * n_windows * w * p * n bytes). Queries build one window's data at a time.
     """
 
-    _O_SETTINGS = ('method', 'w', 'aux_list', 'z_function', 'z_state_names', 'keep_source')
+    _O_SETTINGS = ('method', 'w', 'aux_list', 'z_function', 'z_state_names', 'storage', 'fisher_sensors',
+                   'keep_source')
     _QUERY_SETTINGS = ('R', 'lam')
 
     def __init__(self, simulator, t_sim, x_sim, u_sim, *, method=None, w=None, aux_list=None,
-                 z_function=None, z_state_names=None, R=None, lam=DEFAULT_LAM, keep_source=False,
-                 **method_options):
+                 z_function=None, z_state_names=None, R=None, lam=DEFAULT_LAM, storage='observability',
+                 fisher_sensors=None, keep_source=False, **method_options):
         self.simulator = simulator
         self._t_sim_in = t_sim
         self._x_sim_in = x_sim
@@ -339,8 +388,10 @@ class ObservabilityAnalysis:
             method = 'jax' if _is_jax_simulator(simulator) else 'empirical'
 
         self._settings = {'method': method, 'w': w, 'aux_list': aux_list, 'z_function': z_function,
-                          'z_state_names': z_state_names, 'keep_source': bool(keep_source), 'R': R, 'lam': lam}
+                          'z_state_names': z_state_names, 'storage': storage, 'fisher_sensors': fisher_sensors,
+                          'keep_source': bool(keep_source), 'R': R, 'lam': lam}
         self._method_options = {}
+        self._validate_storage(storage, fisher_sensors)
         self._validate_method(method, method_options, aux_list)
         self._method_options = dict(method_options)
 
@@ -349,21 +400,27 @@ class ObservabilityAnalysis:
     # ------------------------------------------------------------------ construction from existing O
 
     @classmethod
-    def from_sliding(cls, obj, *, R=None, lam=DEFAULT_LAM, keep_source=False):
+    def from_sliding(cls, obj, *, R=None, lam=DEFAULT_LAM, storage='observability', fisher_sensors=None,
+                     keep_source=False):
         """Wrap observability matrices that were already computed.
 
         :param obj: a SlidingO, or an object with O_df_sliding, t_sim and O_index attributes
             (e.g. SlidingEmpiricalObservabilityMatrix, JaxSlidingEmpiricalObservabilityMatrix).
             A list of DataFrames is copied into one array (the caller's list is not kept); a
             SlidingO(O=array, index=..., state_names=...) is used without a copy.
+        :param str storage: what to keep, see the class docstring; with a Fisher mode, O is converted and
+            not kept
+        :param list fisher_sensors: sensors summed into F with storage='fisher'
         :param bool keep_source: keep obj (as ``source``) and its window_data
         """
+        cls._validate_storage(storage, fisher_sensors)
         self = cls.__new__(cls)
         self.simulator = None
         self._t_sim_in = self._x_sim_in = self._u_sim_in = None
         self._external = True
         self._settings = {'method': 'external', 'w': None, 'aux_list': None, 'z_function': None,
-                          'z_state_names': None, 'keep_source': bool(keep_source), 'R': R, 'lam': lam}
+                          'z_state_names': None, 'storage': storage, 'fisher_sensors': fisher_sensors,
+                          'keep_source': bool(keep_source), 'R': R, 'lam': lam}
         self._method_options = {}
         self._discard_results()
         self._store(_from_sliding_object(obj))
@@ -403,6 +460,7 @@ class ObservabilityAnalysis:
         if new_settings['method'] is None:
             new_settings['method'] = 'jax' if _is_jax_simulator(self.simulator) else 'empirical'
         if o_changed:
+            self._validate_storage(new_settings['storage'], new_settings['fisher_sensors'])
             self._validate_method(new_settings['method'], new_options, new_settings['aux_list'])
 
         self._settings = new_settings
@@ -422,6 +480,8 @@ class ObservabilityAnalysis:
         a record of the simulator, and metadata."""
         hyperparameters = {'method': self.method, 'w': self._settings['w'],
                            'z_state_names': self._settings['z_state_names'],
+                           'storage': self._settings['storage'],
+                           'fisher_sensors': self._settings['fisher_sensors'],
                            'keep_source': self._settings['keep_source'],
                            'R': _R_to_yaml(self._settings['R']), 'lam': self._settings['lam']}
         references = {k: _reference(self._settings[k]) for k in self._REFERENCE_SETTINGS}
@@ -507,6 +567,13 @@ class ObservabilityAnalysis:
         return self
 
     @staticmethod
+    def _validate_storage(storage, fisher_sensors):
+        if storage not in STORAGE_MODES:
+            raise ValueError(f'unknown storage {storage!r}; valid storage modes: {list(STORAGE_MODES)}')
+        if fisher_sensors is not None and storage != 'fisher':
+            raise ValueError("fisher_sensors only applies to storage='fisher'")
+
+    @staticmethod
     def _validate_method(method, method_options, aux_list):
         if method not in _BUILDERS:
             raise ValueError(f'unknown method {method!r}; valid methods: {sorted(_BUILDERS)}')
@@ -520,7 +587,11 @@ class ObservabilityAnalysis:
 
     @property
     def is_computed(self):
-        return self._O is not None
+        return self._n_windows is not None
+
+    @property
+    def storage(self):
+        return self._settings['storage']
 
     def run(self):
         """Build the observability matrix of every window with the current settings. Returns self."""
@@ -554,10 +625,25 @@ class ObservabilityAnalysis:
                               '0, 1, 2, ...', UserWarning, stacklevel=3)
             O, state_names, dxdz_sliding = self._transform(O, index, state_names, O_index)
 
-        O = O.view()
-        O.flags.writeable = False   # never modified; also protects an array passed in via SlidingO(O=...)
-        self._O = O
         self._index = index
+        self._n_windows = n_windows
+        storage = self._settings['storage']
+        if storage == 'observability':
+            O = O.view()
+            O.flags.writeable = False   # never modified; also protects an array passed in via SlidingO(O=...)
+            self._O = O
+        else:
+            sensor_names = list(pd.unique(np.asarray(index.get_level_values('sensor'), dtype=object)))
+            if storage == 'fisher_per_sensor':
+                groups = [[s] for s in sensor_names]
+            else:
+                groups = [list(self._settings['fisher_sensors'] or sensor_names)]
+                unknown = [s for s in groups[0] if s not in sensor_names]
+                if unknown:
+                    raise ValueError(f'unknown fisher_sensors {unknown}; available sensors: {sensor_names}')
+            self._F = _pack_fisher(O, index, groups)
+            self._F_groups = groups
+            self._O = None
         self._state_names = state_names
         self._dxdz_sliding = dxdz_sliding
         self._sensor_names = list(pd.unique(np.asarray(index.get_level_values('sensor'), dtype=object)))
@@ -573,7 +659,9 @@ class ObservabilityAnalysis:
     def _transform(self, O, index, state_names, O_index):
         """Transform every window to z coordinates at its initial state, one window at a time."""
         x0_list = self._trajectory_states(O.shape[2])[O_index]
-        dzdx_function = _z_jacobian_function(self._settings['z_function'], O.shape[2])
+        if self._dzdx_function is None:
+            self._dzdx_function = _z_jacobian_function(self._settings['z_function'], O.shape[2])
+        dzdx_function = self._dzdx_function
         O_z = np.empty_like(O)
         dxdz_sliding = []
         z_names = None
@@ -594,7 +682,9 @@ class ObservabilityAnalysis:
         return x_sim.reshape(x_sim.shape[0], n)
 
     def _discard_results(self):
-        self._O = self._index = None
+        self._O = self._index = self._n_windows = None
+        self._F = self._F_groups = None
+        self._dzdx_function = None
         self._dxdz_sliding = None
         self._state_names = self._sensor_names = self._time_steps = None
         self._t_sim = self._O_index = self._w = None
@@ -606,12 +696,15 @@ class ObservabilityAnalysis:
         self._cache = {}
 
     def _require_computed(self):
-        if self._O is None:
+        if self._n_windows is None:
             raise RuntimeError('observability matrices have not been computed with the current settings; '
                                'call run() first')
 
-    def _frames(self):
-        """Per-window DataFrames, built on access."""
+    def _frames(self, what='this query'):
+        """Per-window DataFrames, built on access (storage='observability' only)."""
+        if self._O is None:
+            raise ValueError(f"{what} needs the observability matrices, which storage={self.storage!r} does not "
+                             f"keep; use {_NEEDS_O}")
         return _WindowFrames(self._O, self._index, self._state_names)
 
     # ------------------------------------------------------------------ results (after run)
@@ -626,7 +719,7 @@ class ObservabilityAnalysis:
 
     @property
     def n_windows(self):
-        return self._computed(self._O).shape[0]
+        return self._computed(self._n_windows)
 
     @property
     def state_names(self):
@@ -662,7 +755,7 @@ class ObservabilityAnalysis:
         This builds all windows at once, a full copy of O; use observability_matrix(k) for one window.
         """
         self._require_computed()
-        return list(self._frames())
+        return list(self._frames('O_df_sliding'))
 
     @property
     def window_data(self):
@@ -729,6 +822,10 @@ class ObservabilityAnalysis:
         """
         states, sensors, time_steps = self._select(states, sensors, time_steps)
         R, lam = self._resolve(R, lam, sensors)
+        if self._O is None:
+            raise ValueError(f"fisher() builds per-window FisherObservability objects from the observability "
+                             f"matrices, which storage={self.storage!r} does not keep; use fisher_information() "
+                             f"for each window's F, or {_NEEDS_O}")
         return self._sliding_fisher(states, sensors, time_steps, R, lam, force_R_scalar, keep_windows=True)
 
     def _sliding_fisher(self, states, sensors, time_steps, R, lam, force_R_scalar, keep_windows):
@@ -752,21 +849,119 @@ class ObservabilityAnalysis:
         if cacheable and key in self._cache:
             return self._cache[key].copy()
 
-        ev = self._sliding_fisher(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar,
-                                  keep_windows=False).get_minimum_error_variance()
+        if self._O is not None:
+            ev = self._sliding_fisher(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar,
+                                      keep_windows=False).get_minimum_error_variance()
+        else:
+            ev = self._stored_fisher_error_variance(states_l, sensors_l, time_steps_l, R_r, lam_r, force_R_scalar)
         if cacheable:
             self._cache[key] = ev.copy()
         return ev
 
+    def fisher_information(self, states=None, sensors=None, *, R=_UNSET, force_R_scalar=False):
+        """Fisher information F = O^T R^-1 O of every window for a selection, as an array of shape
+        (n_windows, n_states, n_states) with states in the order given (default: state_names).
+
+        No regularization is added, so it can be combined with, e.g., a per-state lam. Works with every
+        storage mode. With storage='observability' each window equals fisher(...).FO[k].F exactly.
+        """
+        states, sensors, _ = self._select(states, sensors, None)
+        R, _ = self._resolve(R, _UNSET, sensors)
+        if self._O is None:
+            return self._stored_fisher(states, sensors, None, R, force_R_scalar)
+        frames = self._frames()
+        return np.stack([FisherObservability(frames[k], R=R, force_R_scalar=force_R_scalar, states=states,
+                                             sensors=sensors).F.to_numpy() for k in range(self._n_windows)])
+
+    def _stored_fisher(self, states, sensors, time_steps, R, force_R_scalar):
+        """Selected F of every window from the stored per-sensor / summed Fisher information."""
+        if time_steps is not None:
+            raise ValueError(f"selecting time_steps needs the observability matrices, which storage={self.storage!r} "
+                             f"does not keep; use {_NEEDS_O}")
+        if _is_matrix(R):
+            raise ValueError(f"a matrix R needs the observability matrices, which storage={self.storage!r} does not "
+                             f"keep; use a scalar or per-sensor dict R, or {_NEEDS_O}")
+        if force_R_scalar and not np.isscalar(R):
+            raise Exception('R must be a scalar')
+        if R is None:
+            warnings.warn('R not set, defaulting to identity matrix', stacklevel=3)
+
+        if self.storage == 'fisher':
+            summed = self._F_groups[0]
+            if sensors is not None and set(sensors) != set(summed):
+                raise ValueError(f"storage='fisher' keeps F summed over the sensors {summed}, so sensors cannot be "
+                                 f"selected; use storage='fisher_per_sensor' or {_NEEDS_O}")
+            if isinstance(R, dict):
+                raise ValueError("storage='fisher' keeps F for unit noise summed over sensors, so R must be a scalar; "
+                                 f"use storage='fisher_per_sensor' or {_NEEDS_O} for a per-sensor R")
+            group_index, weights = [0], np.array([1.0 if R is None else 1 / float(R)])
+        else:
+            selected = sensors or self._sensor_names
+            group_index = [self._sensor_names.index(s) for s in selected]
+            weights = np.array([1.0 if R is None else 1 / float(R[s] if isinstance(R, dict) else R)
+                                for s in selected])
+
+        packed = np.zeros((self._F.shape[0], self._F.shape[2]))
+        for j, weight in zip(group_index, weights):   # one sensor at a time: no copy of the stored F
+            packed += weight * self._F[:, j, :]
+        F = _unpack_fisher(packed, len(self._state_names))
+        if states is not None:
+            idx = [self._state_names.index(x) for x in states]
+            F = F[:, idx][:, :, idx]
+        return F
+
+    def _stored_fisher_error_variance(self, states, sensors, time_steps, R, lam, force_R_scalar):
+        """min_error_variance from stored Fisher information, aligned like SlidingFisherObservability."""
+        F = self._stored_fisher(states, sensors, time_steps, R, force_R_scalar)
+        names = states or self._state_names
+        EV = pd.DataFrame(np.array([np.diag(_fisher_inverse(F_k, lam)) for F_k in F]), columns=names)
+        n_window = F.shape[0]
+        if self._t_sim is None:
+            time, dt = np.arange(0, n_window, step=1), 1
+        else:
+            time = np.array(self._t_sim)
+            dt = np.mean(np.diff(time)) if len(time) > 1 else 0.0
+        EV.insert(0, 'time_initial', time[:n_window])
+        shift_index = self._w // 2
+        return _align_error_variance(EV, time, shift_index, shift_index * dt,
+                                     aligned=n_window > 1 or self._t_sim is not None)[1]
+
     def observability_matrix(self, window=0, states=None, sensors=None, time_steps=None):
         """Copy of one window's observability matrix, optionally restricted to a selection
-        (rows then ordered by time_step, sensor, as used for the Fisher information)."""
+        (rows then ordered by time_step, sensor, as used for the Fisher information).
+
+        With a Fisher storage mode, O is not stored and this window is recomputed from the simulator.
+        """
         states, sensors, time_steps = self._select(states, sensors, time_steps)
-        O = self._frames()[window]
+        O = self._frames()[window] if self._O is not None else self._recompute_window(window)
         if states is None and sensors is None and time_steps is None:
             return O
         return O.loc[(sensors or self._sensor_names, time_steps or self._time_steps),
                      states or self._state_names].sort_values(['time_step', 'sensor'])
+
+    def _recompute_window(self, window):
+        """Rebuild one window's observability matrix (for Fisher storage modes, where O is not kept)."""
+        if self._external:
+            raise ValueError(f"storage={self.storage!r} does not keep the observability matrices, and this analysis "
+                             f"wraps precomputed data (from_sliding), so they cannot be recomputed; use {_NEEDS_O}")
+        k = range(self._n_windows)[window]   # IndexError when out of range; supports negative indices
+        rows = slice(k, k + self._w)
+
+        def cut(data):
+            if isinstance(data, dict):
+                return {name: np.asarray(v)[rows] for name, v in data.items()}
+            return np.asarray(data)[rows]
+
+        options = {key: v for key, v in self._method_options.items()
+                   if key not in ('parallel_sliding', 'simulator_factory', 'n_workers')}
+        if self._settings['aux_list'] is not None:
+            options['aux_list'] = list(self._settings['aux_list'])[rows]
+        result = _BUILDERS[self.method].func(self.simulator, np.ravel(np.asarray(self._t_sim_in))[rows],
+                                             cut(self._x_sim_in), cut(self._u_sim_in), w=self._w, **options)
+        O, index, state_names = _window_array(result)
+        if self._settings['z_function'] is not None:
+            O, state_names, _ = self._transform(O, index, state_names, np.array([k]))
+        return pd.DataFrame(O[0], index=index, columns=state_names, copy=True)
 
     def plot_observability_matrix(self, window=0, states=None, sensors=None, time_steps=None, *,
                                   state_names=None, sensor_names=None, **plot_kwargs):
@@ -802,6 +997,9 @@ class ObservabilityAnalysis:
         """
         states_l, sensors_l, time_steps_l = self._select(states, sensors, time_steps)
         R_r, lam_r = self._resolve(R, lam, sensors_l)
+        if include_observability_matrices and self._O is None:
+            raise ValueError(f"include_observability_matrices needs the observability matrices, which "
+                             f"storage={self.storage!r} does not keep; use {_NEEDS_O}")
         ev = self.min_error_variance(states_l, sensors_l, time_steps_l, R=R_r, lam=lam_r,
                                      force_R_scalar=force_R_scalar)
 
@@ -833,7 +1031,8 @@ class ObservabilityAnalysis:
             'all_time_steps': self._time_steps,
             'transformed_coordinates': self._settings['z_function'] is not None,
             'w': self._w,
-            'n_windows': self._O.shape[0],
+            'n_windows': self._n_windows,
+            'storage': self.storage,
             'time_alignment': 'each window is stamped at its center time-step, time_initial + (w // 2) * dt',
             'analysis': self._settings_document(),
         }
@@ -853,5 +1052,7 @@ class ObservabilityAnalysis:
         np.savez(path, **arrays)
 
     def __repr__(self):
-        status = f'computed, {self._O.shape[0]} windows' if self.is_computed else 'not computed'
+        status = f'computed, {self._n_windows} windows' if self.is_computed else 'not computed'
+        if self.storage != 'observability':
+            status += f', storage={self.storage!r}'
         return f'ObservabilityAnalysis(method={self.method!r}, w={self._settings["w"]!r}, {status})'

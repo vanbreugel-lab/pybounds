@@ -467,7 +467,8 @@ class TestSettingsYaml:
         document = yaml.safe_load(open(path))
         assert set(document) == {'pybounds_version', 'created', 'settings', 'references', 'simulator'}
         assert document['settings'] == {'method': 'empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
-                                        'keep_source': False, 'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
+                                        'storage': 'observability', 'fisher_sensors': None, 'keep_source': False,
+                                        'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
         assert document['simulator']['state_names'] == ['g', 'd']
         assert document['simulator']['dt'] == 0.01
 
