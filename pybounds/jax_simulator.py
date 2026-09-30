@@ -350,11 +350,40 @@ class JaxSlidingEmpiricalObservabilityMatrix:
         initial state, as in ``SlidingEmpiricalObservabilityMatrix``.
     z_state_names : list of str, optional
         Names of the states in the new coordinates.
+    batch_size : int, optional
+        Compute at most this many windows per batched (vmap) call. None (default) computes all windows in
+        one call. batch_size trades memory against speed:
+
+        - Memory: JAX's working memory for the Jacobians scales with batch_size, so the peak falls as
+          batch_size gets small relative to the number of windows. A batch close to the number of windows
+          can use more memory than no batching, because the chunks are then copied into separate storage.
+        - Speed: smaller batches mean more calls and a slower run. For example, with 790 windows
+          (40 states, 66 sensors, nonlinear dynamics): 1.5 s unbatched, and 1.7 / 2.0 / 3.0 s at
+          batch_size 128 / 32 / 8, whose peaks were 1.5x / 1.14x / 1.05x one copy of O instead of 2.2x.
+        - Results: repeatable for a given batch_size, but XLA vectorizes across the batch, so a few windows
+          can differ from the unbatched result in the last bit (~1e-16 relative). To replay a run exactly,
+          use the same batch_size (or None).
+
+        A batch_size of a few percent of the number of windows keeps most of the memory saving at a moderate
+        time cost; in general, use the largest batch that fits in memory.
     """
 
     @_with_x64
     def __init__(self, jax_simulator, t_sim, x_sim, u_sim, w=None, aux_list=None,
-                 z_function=None, z_state_names=None):
+                 z_function=None, z_state_names=None, batch_size=None):
+        self._prepare(jax_simulator, t_sim, x_sim, u_sim, w=w, aux_list=aux_list)
+        jac_batch, y_batch = self._compute(batch_size=batch_size)
+        self._build_windows(jac_batch, y_batch, z_function, z_state_names)
+
+    @classmethod
+    def _prepared(cls, *args, **kwargs):
+        """Validated, batched inputs without computing anything (used to get O as one array)."""
+        self = cls.__new__(cls)
+        self._prepare(*args, **kwargs)
+        return self
+
+    @_with_x64
+    def _prepare(self, jax_simulator, t_sim, x_sim, u_sim, w=None, aux_list=None):
         _require_jax_simulator(jax_simulator, 'JaxSlidingEmpiricalObservabilityMatrix')
         self.jax_simulator = jax_simulator
         self.n = jax_simulator.n
@@ -404,6 +433,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
             np.stack([x_arr[i] for i in self.O_index]), dtype=jnp.float64)
         u_batch = jnp.array(
             np.stack([u_arr[i:i + w] for i in self.O_index]), dtype=jnp.float64)
+        self._u_arr = u_arr
 
         # Batch aux over windows: window i uses aux_list[i], as in SlidingEmpiricalObservabilityMatrix
         self.aux_list = aux_list
@@ -420,25 +450,83 @@ class JaxSlidingEmpiricalObservabilityMatrix:
                 raise ValueError('aux_list entries must all have the same structure and array shapes '
                                  'so they can be batched across windows') from e
             aux_axis = 0
+        self._batch = (x0_batch, u_batch, aux_batch, aux_axis)
 
-        sim = jax_simulator._simulate_jax
+    def _batched_functions(self):
+        """jit(vmap(jacfwd(simulate))) and jit(vmap(simulate)) over windows."""
+        aux_axis = self._batch[3]
+        sim = self.jax_simulator._simulate_jax
+        return (jax.jit(jax.vmap(jax.jacfwd(sim, argnums=0), in_axes=(0, 0, aux_axis))),
+                jax.jit(jax.vmap(sim, in_axes=(0, 0, aux_axis))))
 
-        # Single vmapped jacfwd call — one XLA kernel for all windows
-        vmapped_jac = jax.jit(
-            jax.vmap(jax.jacfwd(sim, argnums=0), in_axes=(0, 0, aux_axis)))
-        jac_batch = np.array(vmapped_jac(x0_batch, u_batch, aux_batch))  # (n_windows, w, p, n)
+    @_with_x64
+    def _compute(self, copy=True, batch_size=None):
+        """Jacobian (n_windows, w, p, n) and nominal trajectory (n_windows, w, p) of every window.
 
-        # Nominal trajectories for all windows
-        vmapped_sim = jax.jit(jax.vmap(sim, in_axes=(0, 0, aux_axis)))
-        y_batch = np.array(vmapped_sim(x0_batch, u_batch, aux_batch))    # (n_windows, w, p)
+        With copy=False the Jacobian may share JAX's result buffer (read-only), avoiding a second full copy.
+        With batch_size, windows are computed in chunks (see _iter_chunks) into preallocated arrays.
+        """
+        x0_batch, u_batch, aux_batch, aux_axis = self._batch
+        n_windows = len(self.O_index)
+        if batch_size is not None:
+            jac_batch = np.empty((n_windows, self.w, self.p, self.n))
+            y_batch = np.empty((n_windows, self.w, self.p))
+            for start, jac, y in self._iter_chunks(batch_size, warn=False):
+                jac_batch[start:start + len(jac)] = jac
+                y_batch[start:start + len(y)] = y
+        else:
+            # Single vmapped jacfwd call — one XLA kernel for all windows
+            vmapped_jac, vmapped_sim = self._batched_functions()
+            jac_result = vmapped_jac(x0_batch, u_batch, aux_batch)
+            jac_batch = np.array(jac_result) if copy else np.asarray(jac_result)  # (n_windows, w, p, n)
+            del jac_result
+            y_batch = np.array(vmapped_sim(x0_batch, u_batch, aux_batch))    # (n_windows, w, p)
 
-        bad = ~(np.isfinite(jac_batch).all(axis=(1, 2, 3)) & np.isfinite(y_batch).all(axis=(1, 2)))
-        if bad.any():
-            _warn_nonfinite(f'JaxSlidingEmpiricalObservabilityMatrix ({bad.sum()} of {n_windows} windows)')
+        bad = _nonfinite_windows(jac_batch, y_batch)
+        if bad:
+            _warn_nonfinite(f'JaxSlidingEmpiricalObservabilityMatrix ({bad} of {n_windows} windows)')
+        return jac_batch, y_batch
 
-        # Build O_df_sliding list (same format as SlidingEmpiricalObservabilityMatrix)
-        measurement_labels = self.measurement_names * w
-        time_labels = np.repeat(np.arange(w), self.p).astype(int)
+    def _iter_chunks(self, batch_size, warn=True):
+        """Yield (start, jac, y) for consecutive chunks of at most batch_size windows.
+
+        Every call uses exactly batch_size windows (the last chunk is padded by repeating its last window and
+        the padding is dropped), so the batched functions are compiled once. jac may share JAX's buffer
+        (read-only). With warn, NaN/inf values are reported after the last chunk.
+        """
+        if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
+            raise ValueError(f'batch_size must be a positive integer, got {batch_size!r}')
+        x0_batch, u_batch, aux_batch, aux_axis = self._batch
+        n_windows = len(self.O_index)
+        # XLA compiles a batch of one window differently (the batch axis disappears); computing it as a padded
+        # batch of two keeps it on the same code path as larger batches (unless there is only one window)
+        batch_size = min(max(int(batch_size), 2), n_windows)
+        vmapped_jac, vmapped_sim = self._batched_functions()
+        bad = 0
+        for start in range(0, n_windows, batch_size):
+            count = min(batch_size, n_windows - start)
+            idx = np.minimum(np.arange(start, start + batch_size), n_windows - 1)
+            with _x64():
+                aux = None if aux_batch is None else jax.tree_util.tree_map(lambda leaf: leaf[idx], aux_batch)
+                jac = np.asarray(vmapped_jac(x0_batch[idx], u_batch[idx], aux))[:count]
+                y = np.asarray(vmapped_sim(x0_batch[idx], u_batch[idx], aux))[:count]
+            bad += _nonfinite_windows(jac, y)
+            yield start, jac, y
+        if warn and bad:
+            _warn_nonfinite(f'JaxSlidingEmpiricalObservabilityMatrix ({bad} of {n_windows} windows)')
+
+    def _window_frame(self, O_i):
+        """One window's O as a DataFrame (same format as SlidingEmpiricalObservabilityMatrix)."""
+        O_df_i = pd.DataFrame(O_i, columns=self.state_names, index=self.measurement_names * self.w)
+        O_df_i['time_step'] = np.repeat(np.arange(self.w), self.p).astype(int)
+        O_df_i = O_df_i.set_index('time_step', append=True)
+        O_df_i.index.names = ['sensor', 'time_step']
+        return O_df_i
+
+    def _build_windows(self, jac_batch, y_batch, z_function, z_state_names):
+        """Per-window O arrays and DataFrames, window_data, and the optional coordinate transform."""
+        w, u_arr, x0_batch = self.w, self._u_arr, self._batch[0]
+        n_windows = len(self.O_index)
 
         self.O_sliding = []
         self.O_df_sliding = []
@@ -458,12 +546,7 @@ class JaxSlidingEmpiricalObservabilityMatrix:
             self.window_data['u'].append(u_arr[win].copy())
             self.window_data['y'].append(y_batch[i].copy())
 
-            O_df_i = pd.DataFrame(O_i, columns=self.state_names,
-                                  index=measurement_labels)
-            O_df_i['time_step'] = time_labels
-            O_df_i = O_df_i.set_index('time_step', append=True)
-            O_df_i.index.names = ['sensor', 'time_step']
-            self.O_df_sliding.append(O_df_i)
+            self.O_df_sliding.append(self._window_frame(O_i))
 
         # Perform coordinate transformation on each window's O, if specified
         if z_function is not None:
@@ -486,6 +569,12 @@ def _require_jax_simulator(simulator, cls_name):
     if not isinstance(simulator, JaxSimulator):
         raise TypeError(f'{cls_name} requires a JaxSimulator, got {type(simulator).__name__}; '
                         f'use {cls_name[3:]} instead (or compute_observability(..., use_jax=False)).')
+
+
+def _nonfinite_windows(jac, y):
+    """Number of windows whose Jacobian or nominal trajectory has NaN or inf values."""
+    bad = ~(np.isfinite(jac).all(axis=(1, 2, 3)) & np.isfinite(y).all(axis=(1, 2)))
+    return int(bad.sum())
 
 
 def _warn_nonfinite(context):

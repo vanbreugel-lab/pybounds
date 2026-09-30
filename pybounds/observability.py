@@ -62,7 +62,7 @@ def _check_spawn_picklable(obj, name):
 def _compute_window(args):
     """Compute EmpiricalObservabilityMatrix for a single window (called in worker)."""
     global _process_simulator
-    n, O_index, x_sim, u_sim, t_sim, N, w, eps, aux_list, z_function, z_state_names = args
+    n, O_index, x_sim, u_sim, t_sim, N, w, eps, aux_list, z_function, z_state_names, with_data = args
 
     x0 = np.squeeze(x_sim[O_index[n], :])
     win = np.arange(O_index[n], O_index[n] + w, step=1)
@@ -75,13 +75,29 @@ def _compute_window(args):
                                        parallel=False,
                                        z_function=z_function,
                                        z_state_names=z_state_names)
-    window_data = {
-        't': t_win.copy(), 'u': u_win.copy(),
-        'y': EOM.y_nominal.copy(),
-        'y_plus': EOM.y_plus.copy(),
-        'y_minus': EOM.y_minus.copy(),
-    }
+    window_data = None
+    if with_data:
+        window_data = {
+            't': t_win.copy(), 'u': u_win.copy(),
+            'y': EOM.y_nominal.copy(),
+            'y_plus': EOM.y_plus.copy(),
+            'y_minus': EOM.y_minus.copy(),
+        }
     return EOM.O.copy(), EOM.O_df.copy(), window_data
+
+
+def _ordered_thread_map(fn, items, max_workers, max_in_flight):
+    """Like ThreadPoolExecutor.map, in order, but with at most max_in_flight unconsumed results."""
+    from collections import deque
+    items = iter(items)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        pending = deque()
+        for item in items:
+            pending.append(executor.submit(fn, item))
+            if len(pending) >= max_in_flight:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
 
 
 def _reject_jax_simulator(simulator, cls_name):
@@ -330,6 +346,16 @@ class SlidingEmpiricalObservabilityMatrix:
         :param int n_workers: number of worker processes for process-based parallelism.
             Defaults to min(n_windows, os.cpu_count()).
         """
+        self._prepare(simulator, t_sim, x_sim, u_sim, aux_list=aux_list, w=w, eps=eps,
+                      parallel_sliding=parallel_sliding, parallel_perturbation=parallel_perturbation,
+                      simulator_factory=simulator_factory, n_workers=n_workers,
+                      z_function=z_function, z_state_names=z_state_names)
+        self.run()
+
+    def _prepare(self, simulator, t_sim, x_sim, u_sim, aux_list=None, w=None, eps=1e-5,
+                 parallel_sliding=False, parallel_perturbation=False,
+                 simulator_factory=None, n_workers=None,
+                 z_function=None, z_state_names=None):
 
         _reject_jax_simulator(simulator, 'SlidingEmpiricalObservabilityMatrix')
         self.simulator = simulator
@@ -396,10 +422,14 @@ class SlidingEmpiricalObservabilityMatrix:
         self.window_data = {}
         self.O_sliding = []
         self.O_df_sliding = []
-
-        # Run
         self.EOM = None
-        self.run()
+
+    @classmethod
+    def _prepared(cls, *args, **kwargs):
+        """Validated inputs, ready to compute windows, without computing any (used to stream windows)."""
+        self = cls.__new__(cls)
+        self._prepare(*args, **kwargs)
+        return self
 
     def run(self, parallel_sliding=None):
         """ Run.
@@ -413,13 +443,25 @@ class SlidingEmpiricalObservabilityMatrix:
         self.O_sliding = []
         self.O_df_sliding = []
 
+        for O_sliding, O_df_sliding, window_data in self._iter_windows(with_data=True, copy=True):
+            self.O_sliding.append(O_sliding)
+            self.O_df_sliding.append(O_df_sliding)
+            for k in self.window_data.keys():
+                self.window_data[k].append(window_data[k])
+
+    def _iter_windows(self, with_data=True, copy=True):
+        """Yield (O, O_df, window_data) for each window in order, computing one window at a time.
+
+        :param bool with_data: also build each window's trajectory data (window_data is None otherwise)
+        :param bool copy: return copies of O and O_df (not needed when each window is consumed and dropped)
+        """
         # Threads sharing one pybounds Simulator corrupt each other's CasADi/IDAS runs
         if self.parallel_sliding and self.simulator_factory is None and isinstance(self.simulator, Simulator):
             warnings.warn(
                 'parallel_sliding=True without simulator_factory is not thread-safe with pybounds.Simulator '
                 '(CasADi/IDAS); running windows sequentially instead. '
                 'Pass simulator_factory=<callable> to use process-based parallelism.',
-                RuntimeWarning, stacklevel=2)
+                RuntimeWarning, stacklevel=3)
             self.parallel_sliding = False
 
         # Construct O's
@@ -432,44 +474,29 @@ class SlidingEmpiricalObservabilityMatrix:
                 _check_spawn_picklable(self.simulator_factory, 'simulator_factory')
                 _check_spawn_picklable(self.z_function, 'z_function')
                 n_workers = self.n_workers or min(self.n_point, os.cpu_count() or 1)
-                args_list = [
-                    (n, self.O_index, self.x_sim, self.u_sim, self.t_sim,
-                     self.N, self.w, self.eps, self.aux_list,
-                     self.z_function, self.z_state_names)
-                    for n in n_point_range
-                ]
+                args_iter = ((n, self.O_index, self.x_sim, self.u_sim, self.t_sim,
+                              self.N, self.w, self.eps, self.aux_list,
+                              self.z_function, self.z_state_names, with_data)
+                             for n in n_point_range)
                 ctx = multiprocessing.get_context('spawn')
                 with ctx.Pool(processes=n_workers,
                               initializer=_pool_initializer,
                               initargs=(self.simulator_factory,)) as pool:
-                    results = pool.map(_compute_window, args_list)
-
-                for r in results:
-                    self.O_sliding.append(r[0])
-                    self.O_df_sliding.append(r[1])
-                    for k in self.window_data.keys():
-                        self.window_data[k].append(r[2][k])
+                    yield from pool.imap(_compute_window, args_iter)   # in order, as windows finish
 
             else:
                 # ---- Thread-based parallelism, only reached for custom (thread-safe) simulators ----
-                with ThreadPoolExecutor(max_workers=12) as executor:
-                    results = list(executor.map(self.construct, n_point_range))
-
-                for r in results:
-                    self.O_sliding.append(r[0])
-                    self.O_df_sliding.append(r[1])
-                    for k in self.window_data.keys():
-                        self.window_data[k].append(r[2][k])
+                yield from _ordered_thread_map(lambda n: self._window(n, with_data, copy), n_point_range,
+                                               max_workers=12, max_in_flight=24)
 
         else:
             for n in n_point_range:  # each point on trajectory
-                O_sliding, O_df_sliding, window_data = self.construct(n)
-                self.O_sliding.append(O_sliding)
-                self.O_df_sliding.append(O_df_sliding)
-                for k in self.window_data.keys():
-                    self.window_data[k].append(window_data[k])
+                yield self._window(n, with_data, copy)
 
     def construct(self, n):
+        return self._window(n, with_data=True, copy=True)
+
+    def _window(self, n, with_data=True, copy=True):
         # Start simulation at point along nominal trajectory
         x0 = np.squeeze(self.x_sim[self.O_index[n], :])  # get state on trajectory & set it as the initial condition
 
@@ -495,14 +522,16 @@ class SlidingEmpiricalObservabilityMatrix:
         self.EOM = EOM
 
         # Store data
-        O_sliding = EOM.O.copy()
-        O_df_sliding = EOM.O_df.copy()
+        O_sliding = EOM.O.copy() if copy else EOM.O
+        O_df_sliding = EOM.O_df.copy() if copy else EOM.O_df
 
-        window_data = {'t': t_win.copy(),
-                       'u': u_win.copy(),
-                       'y': EOM.y_nominal.copy(),
-                       'y_plus': EOM.y_plus.copy(),
-                       'y_minus': EOM.y_minus.copy()}
+        window_data = None
+        if with_data:
+            window_data = {'t': t_win.copy(),
+                           'u': u_win.copy(),
+                           'y': EOM.y_nominal.copy(),
+                           'y_plus': EOM.y_plus.copy(),
+                           'y_minus': EOM.y_minus.copy()}
 
         return O_sliding, O_df_sliding, window_data
 
@@ -541,7 +570,12 @@ class FisherObservability:
         # Make O a data-frame
         self.pw = O.shape[0]  # number of sensors * time-steps
         self.n = O.shape[1]  # number of states
+        self._R = None       # R and R_inv are built on first access when R is diagonal (scalar or dict)
+        self._R_inv = None
+        self._R_diag = None
         if isinstance(O, pd.DataFrame):  # data-frame given
+            # The copy also normalizes the memory layout of O (pandas < 3), which keeps the matrix products,
+            # and so F, bit-identical to previous versions whatever layout the caller's DataFrame has
             self.O = O.copy()
             self.sensor_names = tuple(O.index.get_level_values('sensor'))
             self.state_names = tuple(O.columns)
@@ -597,12 +631,16 @@ class FisherObservability:
             raise Exception('R must be a scalar')
 
         else:  # non-scalar R
-            self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-            self.R_inv = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
             self.set_noise_covariance(R=R)
 
             # Calculate Fisher Information Matrix for non-scalar R
-            self.F = self.O.values.T @ self.R_inv.values @ self.O.values
+            if self._R_diag is not None:  # diagonal R: O^T R^-1 O without a (w*p x w*p) matrix
+                # (O^T * r_inv) equals O^T @ diag(r_inv) exactly (one nonzero term per element), so F is
+                # bit-identical to the dense product below
+                O_values = self.O.values
+                self.F = np.ascontiguousarray(O_values.T * (1 / self._R_diag)) @ O_values
+            else:
+                self.F = self.O.values.T @ self.R_inv.values @ self.O.values
 
         self.F = pd.DataFrame(self.F, index=self.O.columns, columns=self.O.columns)
 
@@ -613,15 +651,7 @@ class FisherObservability:
             self.lam = lam
 
         # Invert F
-        if self.lam == 'limit':  # calculate limit with symbolic sigma
-            sigma_sym = sp.symbols('sigma')
-            F_hat = self.F.values + sp.Matrix(sigma_sym * np.eye(self.n))
-            F_hat_inv = F_hat.inv()
-            F_hat_inv_limit = F_hat_inv.applyfunc(lambda elem: sp.limit(elem, sigma_sym, 0))
-            self.F_inv = np.array(F_hat_inv_limit, dtype=np.float64)
-        else:  # numeric sigma
-            F_epsilon = self.F.values + (self.lam * np.eye(self.n))
-            self.F_inv = np.linalg.inv(F_epsilon)
+        self.F_inv = _fisher_inverse(self.F.values, self.lam)
 
         self.F_inv = pd.DataFrame(self.F_inv, index=self.O.columns, columns=self.O.columns)
 
@@ -630,39 +660,39 @@ class FisherObservability:
 
     def set_noise_covariance(self, R=None):
         """ Set the measurement noise covariance matrix.
+
+        A scalar, dict or None R is diagonal: it is kept as one variance per row of O (self._R_diag), and
+        the R / R_inv data-frames are only built if accessed. A matrix R is stored as a data-frame.
         """
+        self._R = self._R_inv = self._R_diag = None
 
-        # Preallocate the noise covariance matrix R
-        self.R = pd.DataFrame(np.eye(self.pw), index=self.O.index, columns=self.O.index)
-
-        # Set R based on values in dict
+        # Diagonal R: one variance per row of O
         if isinstance(R, dict):  # set each distinct sensor's noise level
-            for s in pd.unique(self.R.index.get_level_values('sensor')):
-                R_sensor = self.R.loc[[s], [s]]
-                for r in range(R_sensor.shape[0]):
-                    R_sensor.iloc[r, r] = R[s]
+            self._R_diag = np.array([float(R[s]) for s in self.O.index.get_level_values('sensor')])
+            return
+        if R is None:  # set R as identity matrix
+            warnings.warn('R not set, defaulting to identity matrix')
+            self._R_diag = np.ones(self.pw)
+            return
+        if not isinstance(R, (pd.DataFrame, np.ndarray)) or (isinstance(R, np.ndarray) and R.ndim != 2):
+            if np.size(R) == 1:  # scalar multiplied by identity matrix
+                self._R_diag = np.full(self.pw, float(np.squeeze(R)))
+                return
+            raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
 
-                self.R.loc[[s], [s]] = R_sensor.values
-        else:
-            if R is None:  # set R as identity matrix
-                warnings.warn('R not set, defaulting to identity matrix')
-            else:  # set R directly
-                if isinstance(R, pd.DataFrame):  # matrix R in data-frame, aligned with O by index labels
-                    self.R = R.loc[self.O.index, self.O.index].copy()
-                elif isinstance(R, np.ndarray) and R.ndim == 2:  # matrix in array
-                    n_full = len(self._O_index_full)
-                    if R.shape == (n_full, n_full):  # rows/columns in the order of the O passed in
-                        R_full = pd.DataFrame(R, index=self._O_index_full, columns=self._O_index_full)
-                        self.R = R_full.loc[self.O.index, self.O.index].copy()
-                    elif R.shape == (self.pw, self.pw):  # already matches the subset & sorted O
-                        self.R = pd.DataFrame(R, index=self.R.index, columns=self.R.columns)
-                    else:
-                        raise ValueError(f'R array must be ({n_full}, {n_full}) to match O, '
-                                         f'or ({self.pw}, {self.pw}) to match the selected subset of O')
-                elif np.size(R) == 1:  # scalar multiplied by identity matrix
-                    self.R = float(np.squeeze(R)) * self.R
-                else:
-                    raise Exception('R must be a dict, numpy array, pandas data-frame, or scalar value')
+        # Matrix R
+        if isinstance(R, pd.DataFrame):  # matrix R in data-frame, aligned with O by index labels
+            self.R = R.loc[self.O.index, self.O.index].copy()
+        else:  # matrix in array
+            n_full = len(self._O_index_full)
+            if R.shape == (n_full, n_full):  # rows/columns in the order of the O passed in
+                R_full = pd.DataFrame(R, index=self._O_index_full, columns=self._O_index_full)
+                self.R = R_full.loc[self.O.index, self.O.index].copy()
+            elif R.shape == (self.pw, self.pw):  # already matches the subset & sorted O
+                self.R = pd.DataFrame(R, index=self.O.index, columns=self.O.index)
+            else:
+                raise ValueError(f'R array must be ({n_full}, {n_full}) to match O, '
+                                 f'or ({self.pw}, {self.pw}) to match the selected subset of O')
 
         # Inverse of R
         R_diagonal = np.diag(self.R.values)
@@ -674,13 +704,35 @@ class FisherObservability:
 
         self.R_inv = pd.DataFrame(self.R_inv, index=self.R.index, columns=self.R.index)
 
+    @property
+    def R(self):
+        """Measurement noise covariance as a (w*p x w*p) data-frame (built on first access for diagonal R)."""
+        if self._R is None and self._R_diag is not None:
+            self._R = pd.DataFrame(np.diag(self._R_diag), index=self.O.index, columns=self.O.index)
+        return self._R
+
+    @R.setter
+    def R(self, value):
+        self._R = value
+
+    @property
+    def R_inv(self):
+        """Inverse of R as a data-frame (built on first access for diagonal R)."""
+        if self._R_inv is None and self._R_diag is not None:
+            self._R_inv = pd.DataFrame(np.diag(1 / self._R_diag), index=self.O.index, columns=self.O.index)
+        return self._R_inv
+
+    @R_inv.setter
+    def R_inv(self, value):
+        self._R_inv = value
+
     def get_fisher_information(self):
         return self.F.copy(), self.F_inv.copy(), self.R.copy()
 
 
 class SlidingFisherObservability:
     def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
-                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False):
+                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False, keep_windows=True):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
 
@@ -700,6 +752,8 @@ class SlidingFisherObservability:
         :param None | tuple | list | np.array w: window size to use from O's,
             if None then just grab it from O as the maximum window size
         :param bool force_R_scalar: force R to be a scalar in each window (see FisherObservability)
+        :param bool keep_windows: keep each window's FisherObservability object in self.FO. With False, only
+            the error variance is kept (self.FO stays empty), so memory does not grow with the number of windows
         """
 
         self.O_list = O_list
@@ -730,7 +784,8 @@ class SlidingFisherObservability:
             # Compute Fisher information & inverse
             FO = FisherObservability(O, R=R, lam=lam, force_R_scalar=force_R_scalar,
                                      states=states, sensors=sensors, time_steps=time_steps, w=w)
-            self.FO.append(FO)
+            if keep_windows:
+                self.FO.append(FO)
 
             # Collect error variance data
             ev = FO.error_variance.copy()
@@ -738,21 +793,43 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
-        # Shift the time forward by half the window size. Floor division puts odd windows at their center
-        # time-step (w-1)/2; np.round's banker's rounding gave 2, 2, 4, 4 for w = 3, 5, 7, 9.
         self.shift_index = int(FO.w) // 2
         self.shift_time = self.shift_index * self.dt
-        self.EV = pd.concat(self.EV, axis=0, ignore_index=True)
-        if self.n_window > 1 or time is not None:  # align windows with the time vector
-            self.EV.index = np.arange(self.shift_index, self.EV.shape[0] + self.shift_index, step=1, dtype=int)
-            time_df = pd.DataFrame(np.atleast_2d(self.time).T, columns=['time'])
-            self.EV_aligned = pd.concat((time_df, self.EV), axis=1)
-        else:  # single window without a time vector: time in units of time-steps
-            self.EV_aligned = self.EV.copy()
-            self.EV_aligned.insert(0, 'time', self.EV['time_initial'] + self.shift_time)
+        self.EV, self.EV_aligned = _align_error_variance(pd.concat(self.EV, axis=0, ignore_index=True),
+                                                         self.time, self.shift_index, self.shift_time,
+                                                         aligned=self.n_window > 1 or time is not None)
 
     def get_minimum_error_variance(self):
         return self.EV_aligned.copy()
+
+
+def _fisher_inverse(F, lam):
+    """(F + lam*I)^-1 for an (n, n) array F; lam='limit' takes lam -> 0 symbolically."""
+    n = F.shape[0]
+    if lam == 'limit':  # calculate limit with symbolic sigma
+        sigma_sym = sp.symbols('sigma')
+        F_hat = F + sp.Matrix(sigma_sym * np.eye(n))
+        F_hat_inv = F_hat.inv()
+        F_hat_inv_limit = F_hat_inv.applyfunc(lambda elem: sp.limit(elem, sigma_sym, 0))
+        return np.array(F_hat_inv_limit, dtype=np.float64)
+    F_epsilon = F + (lam * np.eye(n))  # numeric sigma
+    return np.linalg.inv(F_epsilon)
+
+
+def _align_error_variance(EV, time, shift_index, shift_time, aligned):
+    """Place one row per window (columns 'time_initial' + states) on the trajectory's time axis.
+
+    Each window is shifted forward by half its size (floor division puts odd windows at their center
+    time-step (w-1)/2). Returns (EV with the shifted index, EV_aligned with a 'time' column).
+    """
+    if aligned:  # align windows with the time vector
+        EV.index = np.arange(shift_index, EV.shape[0] + shift_index, step=1, dtype=int)
+        time_df = pd.DataFrame(np.atleast_2d(time).T, columns=['time'])
+        return EV, pd.concat((time_df, EV), axis=1)
+    # single window without a time vector: time in units of time-steps
+    EV_aligned = EV.copy()
+    EV_aligned.insert(0, 'time', EV['time_initial'] + shift_time)
+    return EV, EV_aligned
 
 
 def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_state_names=None):
@@ -810,6 +887,21 @@ def transform_states(O=None, square_flag=False, z_function=None, x0=None, z_stat
     return O_z, dxdz, dzdx_sym
 
 
+def _z_jacobian_function(z_function, n):
+    """Numerical dz/dx function of a coordinate transform over n states (symbolic Jacobian built once)."""
+    x_sym = sp.symbols('x_0:%d' % n)
+    return SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+
+
+def _transform_O_df(O_df, x0, dzdx_function, z_state_names):
+    """One window of transform_states: returns (O_z, dx/dz) with O_z = O_df @ dx/dz at x0."""
+    dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
+    O_z = O_df @ dxdz
+    if z_state_names is not None:
+        O_z.columns = z_state_names
+    return O_z, dxdz
+
+
 def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_dxdz=False):
     """Apply ``transform_states`` to each O data-frame at its own x0.
 
@@ -817,16 +909,12 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_d
     builds (and simplifies) the symbolic Jacobian only once. With return_dxdz=True,
     also returns the list of numerical dx/dz Jacobians (one per window).
     """
-    x_sym = sp.symbols('x_0:%d' % O_df_list[0].shape[1])
-    dzdx_function = SymbolicJacobian(func=z_function, state_vars=x_sym).get_jacobian_function()
+    dzdx_function = _z_jacobian_function(z_function, O_df_list[0].shape[1])
 
     O_df_z = []
     dxdz_list = []
     for O_df, x0 in zip(O_df_list, x0_list):
-        dxdz = np.linalg.inv(dzdx_function(np.array(x0)))
-        O_z = O_df @ dxdz
-        if z_state_names is not None:
-            O_z.columns = z_state_names
+        O_z, dxdz = _transform_O_df(O_df, x0, dzdx_function, z_state_names)
         O_df_z.append(O_z)
         dxdz_list.append(dxdz)
 

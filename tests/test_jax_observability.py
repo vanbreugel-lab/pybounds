@@ -13,6 +13,7 @@ tolerances.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 import sympy as sp
 
@@ -511,3 +512,97 @@ class TestBackendMismatch:
         with pytest.raises(TypeError, match=f'use_jax={not use_jax}'):
             pybounds.compute_observability(sim, seom.t_sim, seom.x_sim, seom.u_sim, R={'r': 0.1},
                                            w=WINDOW_SIZE, use_jax=use_jax)
+
+
+# ---------------------------------------------------------------------------
+# batch_size: windows computed in chunks give the same results
+# ---------------------------------------------------------------------------
+
+def f_nonlinear(x, u, aux):
+    return jnp.array([jnp.sin(x[1]) * aux['gain'] + u[0], -0.3 * x[0] ** 3 + 0.1 * x[1]])
+
+
+def h_nonlinear(x, u, aux):
+    return jnp.array([jnp.tanh(x[0] / x[1]), x[0] * x[1] + aux['offset']])
+
+
+@pytest.fixture(scope='module')
+def jax_sim_nonlinear():
+    return JaxSimulator(f_nonlinear, h_nonlinear, dt=DT, state_names=STATE_NAMES, input_names=INPUT_NAMES,
+                        measurement_names=['r', 'q'])
+
+
+def _nonlinear_trajectory(N=40):
+    t = DT * np.arange(N)
+    x = np.column_stack([2.0 + 0.3 * np.sin(t * 5), 3.0 + 0.1 * np.cos(t * 3)])
+    u = 0.1 * np.ones((N, 1))
+    aux_list = [{'gain': 1.0 + 0.01 * k, 'offset': 0.02 * k} for k in range(N)]
+    return t, x, u, aux_list
+
+
+class TestJaxBatchSize:
+    @staticmethod
+    def _O(batch_size=None, **extra):
+        t, x, u, aux_list = _nonlinear_trajectory()
+        sim = JaxSimulator(f_nonlinear, h_nonlinear, dt=DT, state_names=STATE_NAMES, input_names=INPUT_NAMES,
+                           measurement_names=['r', 'q'])
+        obj = JaxSlidingEmpiricalObservabilityMatrix(sim, t, x, u, w=6, aux_list=aux_list, batch_size=batch_size,
+                                                     **extra)
+        return np.stack(obj.O_sliding), np.stack(obj.window_data['y'])
+
+    @pytest.mark.parametrize('batch_size', [1, 2, 3, 7, 16])
+    def test_small_batches_agree_to_rounding_and_repeat_exactly(self, batch_size):
+        full_O, full_y = self._O()
+        O, y = self._O(batch_size)
+        again_O, again_y = self._O(batch_size)
+        np.testing.assert_array_equal(O, again_O)        # repeatable for a given batch_size
+        np.testing.assert_array_equal(y, again_y)
+        assert np.max(np.abs(O - full_O)) <= 1e-14 * np.max(np.abs(full_O))   # ~1 ulp from XLA vectorization
+        assert np.max(np.abs(y - full_y)) <= 1e-14 * np.max(np.abs(full_y))
+
+    @pytest.mark.parametrize('batch_size', [35, 100])
+    def test_batch_covering_all_windows_is_identical(self, batch_size):
+        full_O, full_y = self._O(z_function=z_optic_flow, z_state_names=Z_STATE_NAMES)
+        O, y = self._O(batch_size, z_function=z_optic_flow, z_state_names=Z_STATE_NAMES)
+        np.testing.assert_array_equal(O, full_O)
+        np.testing.assert_array_equal(y, full_y)
+
+    @pytest.mark.parametrize('storage', ['observability', 'fisher_per_sensor'])
+    @pytest.mark.parametrize('batch_size', [4, 35])
+    def test_analysis_matches_class(self, jax_sim_nonlinear, storage, batch_size):
+        """The streaming analysis path stores exactly what the class computes with the same batch_size."""
+        t, x, u, aux_list = _nonlinear_trajectory()
+        kwargs = dict(w=6, aux_list=aux_list, R={'r': 0.1, 'q': 0.3})
+        batched = pybounds.ObservabilityAnalysis(jax_sim_nonlinear, t, x, u, batch_size=batch_size, storage=storage,
+                                                 **kwargs).run()
+        reference = pybounds.ObservabilityAnalysis.from_sliding(
+            JaxSlidingEmpiricalObservabilityMatrix(jax_sim_nonlinear, t, x, u, w=6, aux_list=aux_list,
+                                                   batch_size=batch_size), R={'r': 0.1, 'q': 0.3}, storage=storage)
+        stored = '_O' if storage == 'observability' else '_F'
+        np.testing.assert_array_equal(getattr(batched, stored), getattr(reference, stored))
+        pd.testing.assert_frame_equal(batched.min_error_variance(states=['d'], sensors=['q']),
+                                      reference.min_error_variance(states=['d'], sensors=['q']), check_exact=True)
+        assert batched.settings['batch_size'] == batch_size
+
+    def test_single_window(self, jax_sim_nonlinear):
+        t, x, u, aux_list = _nonlinear_trajectory(N=8)
+        full = JaxSlidingEmpiricalObservabilityMatrix(jax_sim_nonlinear, t, x, u, aux_list=aux_list)
+        batched = JaxSlidingEmpiricalObservabilityMatrix(jax_sim_nonlinear, t, x, u, aux_list=aux_list, batch_size=4)
+        np.testing.assert_array_equal(batched.O_sliding[0], full.O_sliding[0])
+
+    @pytest.mark.parametrize('batch_size', [0, -2, 1.5, True, '8'])
+    def test_invalid_batch_size(self, jax_sim, seom, batch_size):
+        with pytest.raises(ValueError, match='batch_size must be a positive integer'):
+            JaxSlidingEmpiricalObservabilityMatrix(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE,
+                                                   batch_size=batch_size)
+
+    def test_nonfinite_warning_with_batches(self, jax_sim_log):
+        n, w = 12, 3
+        x_sim = np.r_[np.ones(8), -np.ones(4)][:, None]
+        with pytest.warns(RuntimeWarning, match=r'\(2 of 10 windows\) contains NaN or inf'):
+            pybounds.ObservabilityAnalysis(jax_sim_log, np.arange(n) * DT, x_sim, np.zeros((n, 1)), w=w,
+                                           batch_size=3).run()
+
+    def test_batch_size_is_a_jax_option_only(self, simulator, seom):
+        with pytest.raises(TypeError, match=r"method 'empirical' does not accept: \['batch_size'\]"):
+            pybounds.ObservabilityAnalysis(simulator, seom.t_sim, seom.x_sim, seom.u_sim, batch_size=8)

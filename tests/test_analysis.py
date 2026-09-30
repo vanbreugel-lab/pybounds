@@ -1,3 +1,4 @@
+from pathlib import Path
 import inspect
 import subprocess
 import sys
@@ -123,6 +124,15 @@ class TestEquivalence:
                                          time_steps=np.arange(WINDOW_SIZE))
         pd.testing.assert_frame_equal(explicit, oa.min_error_variance())
 
+    def test_source_and_window_data_are_opt_in(self, oa, simulator, trajectory):
+        with pytest.raises(RuntimeError, match='keep_source=True'):
+            oa.source
+        with pytest.raises(RuntimeError, match='keep_source=True'):
+            oa.window_data
+        kept = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE, eps=EPS, keep_source=True).run()
+        assert isinstance(kept.source, pybounds.SlidingEmpiricalObservabilityMatrix)
+        assert set(kept.window_data) == {'t', 'u', 'y', 'y_plus', 'y_minus'}
+
     def test_attributes(self, oa, seom):
         assert oa.method == 'empirical'
         assert oa.w == WINDOW_SIZE
@@ -132,8 +142,6 @@ class TestEquivalence:
         assert oa.time_steps == list(range(WINDOW_SIZE))
         np.testing.assert_array_equal(oa.O_index, np.arange(N_WINDOWS))
         np.testing.assert_allclose(oa.O_time, seom.t_sim[:N_WINDOWS])
-        assert isinstance(oa.source, pybounds.SlidingEmpiricalObservabilityMatrix)
-        assert set(oa.window_data) == {'t', 'u', 'y', 'y_plus', 'y_minus'}
         assert oa.dxdz_sliding is None
         for O_a, O_b in zip(oa.O_df_sliding, seom.O_df_sliding):
             pd.testing.assert_frame_equal(O_a, O_b)
@@ -207,12 +215,12 @@ class TestMethodsAndOptions:
         """parallel_sliding with a thread-safe custom simulator gives the sequential result."""
         seq = ObservabilityAnalysis(AnalyticSimulator(), *trajectory, w=WINDOW_SIZE, eps=EPS, R=0.1).run()
         par = ObservabilityAnalysis(AnalyticSimulator(), *trajectory, w=WINDOW_SIZE, eps=EPS, R=0.1,
-                                    parallel_sliding=True).run()
+                                    parallel_sliding=True, keep_source=True).run()
         assert par.source.parallel_sliding is True
         pd.testing.assert_frame_equal(par.min_error_variance(), seq.min_error_variance())
 
     def test_builder_default_eps_applies(self, simulator, trajectory):
-        oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE).run()
+        oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE, keep_source=True).run()
         assert oa.source.eps == 1e-5
 
 
@@ -325,11 +333,17 @@ class TestCaching:
     def test_cache_hits(self, oa_fresh, monkeypatch):
         oa_fresh.min_error_variance(states=['d'])
         calls = []
-        monkeypatch.setattr(oa_fresh, 'fisher', lambda *a, **k: calls.append(1))
+
+        def computed(*args, **kwargs):
+            calls.append(1)
+            raise RuntimeError('recomputed')
+
+        monkeypatch.setattr(oa_fresh, '_fast_windows', computed)
+        monkeypatch.setattr(oa_fresh, '_sliding_fisher', computed)
         oa_fresh.min_error_variance(states=['d'])
         assert calls == []
         oa_fresh.clear_cache()
-        with pytest.raises(AttributeError):   # the stubbed fisher() is called again after clearing
+        with pytest.raises(RuntimeError, match='recomputed'):   # computed again after clearing
             oa_fresh.min_error_variance(states=['d'])
 
 
@@ -457,9 +471,10 @@ class TestSettingsYaml:
     def test_file_is_plain_yaml(self, simulator, trajectory, tmp_path):
         import yaml
         _, _, path = self._roundtrip(simulator, trajectory, tmp_path, w=WINDOW_SIZE, eps=1e-4, R={'r': 0.1})
-        document = yaml.safe_load(open(path))
+        document = yaml.safe_load(Path(path).read_text())
         assert set(document) == {'pybounds_version', 'created', 'settings', 'references', 'simulator'}
         assert document['settings'] == {'method': 'empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
+                                        'storage': 'observability', 'fisher_sensors': None, 'keep_source': False,
                                         'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
         assert document['simulator']['state_names'] == ['g', 'd']
         assert document['simulator']['dt'] == 0.01
@@ -480,7 +495,7 @@ class TestSettingsYaml:
         oa = ObservabilityAnalysis(simulator, *trajectory, z_function=z_optic_flow, z_state_names=['q', 'd'],
                                    simulator_factory=_module_level_factory, aux_list=[None] * N_STEPS_SLIDING)
         path = oa.save_settings(tmp_path / 's.yaml')
-        references = yaml.safe_load(open(path))['references']
+        references = yaml.safe_load(Path(path).read_text())['references']
         assert references == {'aux_list': '<set>', 'z_function': 'test_analysis:z_optic_flow',
                               'simulator_factory': 'test_analysis:_module_level_factory'}
         with pytest.warns(UserWarning, match=r"references \['aux_list', 'z_function', 'simulator_factory'\]"):
@@ -537,7 +552,7 @@ class TestSaveResults:
         ev = pd.read_csv(files['min_error_variance'])
         pd.testing.assert_frame_equal(ev, oa_fresh.min_error_variance(states=['d'], time_steps=[0, 1, 2], lam=1e-6),
                                       check_index_type=False)
-        sidecar = yaml.safe_load(open(files['sidecar']))
+        sidecar = yaml.safe_load(Path(files['sidecar']).read_text())
         assert sidecar['selection'] == {'states': ['d'], 'sensors': ['r'], 'time_steps': [0, 1, 2],
                                         'R': {'r': 0.1}, 'lam': 1e-6, 'force_R_scalar': False}
         assert sidecar['all_states'] == ['g', 'd']
@@ -551,7 +566,7 @@ class TestSaveResults:
     def test_default_selection_records_everything(self, oa_fresh, tmp_path):
         import yaml
         files = oa_fresh.save_results(tmp_path)
-        selection = yaml.safe_load(open(files['sidecar']))['selection']
+        selection = yaml.safe_load(Path(files['sidecar']).read_text())['selection']
         assert selection['states'] == ['g', 'd'] and selection['sensors'] == ['r']
 
     def test_observability_matrices_npz(self, oa_fresh, tmp_path):
@@ -574,7 +589,7 @@ class TestSaveResults:
         with np.load(files['observability_matrices']) as data:
             assert list(data['state_names']) == ['q', 'd']
             np.testing.assert_array_equal(data['O'][0], oa.O_df_sliding[0].values)
-        sidecar = yaml.safe_load(open(files['sidecar']))
+        sidecar = yaml.safe_load(Path(files['sidecar']).read_text())
         assert sidecar['transformed_coordinates'] is True
         assert sidecar['analysis']['references']['z_function'] == 'test_analysis:z_optic_flow'
 
