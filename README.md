@@ -96,9 +96,40 @@ oa.save_results('results_g', states=['g'], include_observability_matrices=True)
 ```
 
 - **Dropping a state is conditional:** the states you leave out are treated as known, so the remaining ones usually look more observable than when every state is estimated together.
-- **Changing settings:** `update_settings(...)` changes settings before or after `run()`. Changing anything that affects the observability matrices (e.g. `w`, `eps`, `z_function`) discards the results until you call `run()` again; changing `R` or `lam` does not.
-- **Backends:** `method` picks how the observability matrices are built: `'empirical'` (finite differences) or `'jax'` (autodiff). It is chosen automatically from the simulator type.
-- **Memory:** `run()` keeps every window's observability matrix (8·n_windows·w·p·n bytes). For long windows, `storage='fisher_per_sensor'` keeps each sensor's Fisher information instead, which is smaller when w > (n+1)/2 and still supports selecting states and sensors with a scalar or per-sensor R. With `method='jax'`, `batch_size=...` computes windows in chunks to cap JAX's memory. See [the storage design note](docs/design/observability_storage.md).
+- **Changing settings:** `update_settings(...)` changes settings before or after `run()`. Changing anything that affects the observability matrices (e.g. `w`, `eps`, `z_function`) discards the results until you call `run()` again; changing the query settings `R`, `lam`, `Q` or `alignment` does not.
+- **Methods:** `method` picks how each window's Fisher information is computed. It defaults to `'bounds-jax'` for a `JaxSimulator` and `'bounds-empirical'` otherwise.
+  - `'bounds-empirical'` (finite differences) and `'bounds-jax'` (autodiff) build the empirical observability matrix, with no process noise. The older names `'empirical'` and `'jax'` still work.
+  - `'stochastic-observability-classic'` / `'-jax'` and `'stochastic-constructability-classic'` / `'-jax'` include process noise `Q` (see below).
+- **Memory:** `run()` keeps every window's observability matrix (8·n_windows·w·p·n bytes). For long windows, `storage='fisher_per_sensor'` keeps each sensor's Fisher information instead, which is smaller when w > (n+1)/2 and still supports selecting states and sensors with a scalar or per-sensor R. With `method='bounds-jax'`, `batch_size=...` computes windows in chunks to cap JAX's memory. See [the storage design note](docs/design/observability_storage.md).
+
+### Process noise: stochastic observability and constructability
+
+The `bounds-*` methods assume no process noise, so a longer window always adds information. With process noise `Q`, measurements far from the state of interest say little about it, and the information saturates. The stochastic methods compute this. They follow Boyacioglu & van Breugel, "Duality of Stochastic Observability and Constructability and their Relation to the Fisher Information", *IEEE L-CSS* (2025), [doi:10.1109/LCSYS.2025.3547297](https://doi.org/10.1109/LCSYS.2025.3547297).
+
+```python
+oa = pybounds.ObservabilityAnalysis(sim, t, x, u, method='stochastic-constructability-classic',
+                                    w=20, R={'r': 0.1}, Q={'g': 1e-3, 'd': 1e-6})
+ev = oa.run().min_error_variance()
+ev_more_noise = oa.min_error_variance(Q=1e-2)   # Q, R and lam can change without run()
+```
+
+- **Observability vs constructability:** stochastic *observability* (Eq. 33) is the Fisher information about the state at the **start** of each window, the same state the `bounds-*` methods describe. Stochastic *constructability* (Eq. 30) is about the state at the **end** of each window. Its inverse is the posterior Cramér-Rao bound, the quantity a Kalman filter's error covariance tracks.
+- **`Q`** is the per-step discrete process noise covariance. It can be a scalar, a dict per state, or an (n, n) matrix, and it must be strictly positive. Give constant parameters a small `Q` rather than zero.
+- **Linearization:** the model is linearized along the trajectory (Φ = expm(A·dt)). `-classic` uses finite differences; `-jax` uses autodiff and needs `f` and `h` written with `jax.numpy`. Because of the linearization, results differ from the `bounds-*` methods by discretization error even as Q → 0. `pybounds.stochastic` also exposes the recursions directly, for linear time-varying systems.
+- **Validation:** [validation/stochastic_duality_fig2.ipynb](validation/stochastic_duality_fig2.ipynb) checks the recursions against the paper's MATLAB code and redraws its Fig. 2.
+
+### Where each window's result is placed: `alignment`
+
+Each window gives one value per state, and that value has to be placed somewhere along the trajectory.
+
+- **`alignment='center'` (default):** at the window's center time-step, `w // 2`, for every method. Different methods can then be compared on one time axis.
+- **`alignment='bounded_state'`:** at the state the result actually bounds. That is the window's first time-step for `bounds-*` and stochastic observability, and its last time-step for stochastic constructability.
+
+```python
+ev = oa.min_error_variance(alignment='bounded_state')   # or set it once: update_settings(alignment=...)
+```
+
+Observability and constructability viewed at their bounded states are offset by `w - 1` time-steps. Centered, they usually line up, especially for short windows. The `time` column is where each row is placed, and `time_initial` is the time of the window's first sample.
 
 ## Notebook examples
 

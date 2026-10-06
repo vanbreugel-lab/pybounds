@@ -134,7 +134,7 @@ class TestStorage:
     def test_builder_streams_by_default(self, monkeypatch):
         """By default windows are streamed: no full builder object (with y_plus/y_minus for every window) exists."""
         from pybounds import analysis
-        original = analysis._BUILDERS['empirical']
+        original = analysis._BUILDERS['bounds-empirical']
         results = []
 
         def func(*args, **kwargs):
@@ -142,7 +142,7 @@ class TestStorage:
             results.append(result)
             return result
 
-        monkeypatch.setitem(analysis._BUILDERS, 'empirical', analysis._Builder(func, original.options))
+        monkeypatch.setitem(analysis._BUILDERS, 'bounds-empirical', analysis._Builder(func, original.options))
         oa = ObservabilityAnalysis(SIM, T, X, U, w=5, eps=1e-4).run()
         assert isinstance(results[0], analysis._WindowStream) and results[0].source is None
         assert oa._source is None and oa._window_data is None

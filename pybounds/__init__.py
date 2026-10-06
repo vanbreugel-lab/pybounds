@@ -11,6 +11,10 @@ from .observability import compute_observability
 
 from .analysis import ObservabilityAnalysis
 
+from . import stochastic
+from .stochastic import (stochastic_observability_gramian, stochastic_constructability_gramian,
+                         deterministic_observability_gramian, process_covariance)
+
 from .jacobian import SymbolicJacobian
 
 from .util import colorline, plot_heatmap_log_timeseries
@@ -31,6 +35,11 @@ __all__ = [
     'transform_states',
     'compute_observability',
     'ObservabilityAnalysis',
+    'stochastic',
+    'stochastic_observability_gramian',
+    'stochastic_constructability_gramian',
+    'deterministic_observability_gramian',
+    'process_covariance',
     'SymbolicJacobian',
     'colorline',
     'plot_heatmap_log_timeseries',

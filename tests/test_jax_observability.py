@@ -604,5 +604,5 @@ class TestJaxBatchSize:
                                            batch_size=3).run()
 
     def test_batch_size_is_a_jax_option_only(self, simulator, seom):
-        with pytest.raises(TypeError, match=r"method 'empirical' does not accept: \['batch_size'\]"):
+        with pytest.raises(TypeError, match=r"method 'bounds-empirical' does not accept: \['batch_size'\]"):
             pybounds.ObservabilityAnalysis(simulator, seom.t_sim, seom.x_sim, seom.u_sim, batch_size=8)

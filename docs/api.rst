@@ -32,6 +32,14 @@ Observability
 
 .. autofunction:: pybounds.compute_observability
 
+Stochastic observability and constructability
+---------------------------------------------
+
+.. automodule:: pybounds.stochastic
+   :members: stochastic_observability_gramian, stochastic_constructability_gramian,
+             deterministic_observability_gramian, duality_check, process_covariance, linearize,
+             sliding_gramians, window_observability_matrix, fd_jacobian
+
 Visualisation
 -------------
 

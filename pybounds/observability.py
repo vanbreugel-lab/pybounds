@@ -732,7 +732,8 @@ class FisherObservability:
 
 class SlidingFisherObservability:
     def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
-                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False, keep_windows=True):
+                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False, keep_windows=True,
+                 shift_index=None):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
 
@@ -754,6 +755,8 @@ class SlidingFisherObservability:
         :param bool force_R_scalar: force R to be a scalar in each window (see FisherObservability)
         :param bool keep_windows: keep each window's FisherObservability object in self.FO. With False, only
             the error variance is kept (self.FO stays empty), so memory does not grow with the number of windows
+        :param None | int shift_index: how many time-steps past its start each window's result is placed.
+            None (default) places it at the window's center, w // 2
         """
 
         self.O_list = O_list
@@ -793,7 +796,7 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
-        self.shift_index = int(FO.w) // 2
+        self.shift_index = int(FO.w) // 2 if shift_index is None else int(shift_index)
         self.shift_time = self.shift_index * self.dt
         self.EV, self.EV_aligned = _align_error_variance(pd.concat(self.EV, axis=0, ignore_index=True),
                                                          self.time, self.shift_index, self.shift_time,
@@ -819,8 +822,8 @@ def _fisher_inverse(F, lam):
 def _align_error_variance(EV, time, shift_index, shift_time, aligned):
     """Place one row per window (columns 'time_initial' + states) on the trajectory's time axis.
 
-    Each window is shifted forward by half its size (floor division puts odd windows at their center
-    time-step (w-1)/2). Returns (EV with the shifted index, EV_aligned with a 'time' column).
+    Each window is shifted forward by shift_index time-steps (by default half its size: floor division puts
+    odd windows at their center time-step (w-1)/2). Returns (EV with the shifted index, EV_aligned with a 'time' column).
     """
     if aligned:  # align windows with the time vector
         EV.index = np.arange(shift_index, EV.shape[0] + shift_index, step=1, dtype=int)
@@ -1109,7 +1112,7 @@ def compute_observability(simulator, t_sim, x_sim, u_sim, R,
     from .analysis import ObservabilityAnalysis   # imported here: analysis imports this module
 
     method_options = {} if use_jax else {'eps': eps}   # eps does not apply to the JAX backend
-    analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='jax' if use_jax else 'empirical',
+    analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='bounds-jax' if use_jax else 'bounds-empirical',
                                      w=w, R=R, lam=lam, **method_options)
     return analysis.run().min_error_variance(states=simulator.state_names, sensors=simulator.measurement_names,
                                              time_steps=None if w is None else np.arange(w))
