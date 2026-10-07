@@ -560,6 +560,8 @@ class FisherObservability:
             lam is absolute, so it should be small relative to the eigenvalues of F, which scale with 1/R
             and with the units of each state. Default 1e-8 (ceiling of 1e8).
             If lam='limit', compute the limit lam -> 0 symbolically.
+            A 1-D array (one value per state, in the order of states) regularizes each state separately,
+            (F + diag(lam))^-1.
         :param bool force_R_scalar: force R to be a scalar, useful when the resulting R matrix is too big to fit in memory
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -745,7 +747,8 @@ class SlidingFisherObservability:
             if None, then R = I_(nxn)
         :param float | str lam: regularization for inverting F in each window, computed as (F + lam*I)^-1.
             1/lam is the ceiling on the minimum error variance (see FisherObservability). Default 1e-8.
-            If lam='limit', compute the limit lam -> 0 symbolically.
+            If lam='limit', compute the limit lam -> 0 symbolically. A 1-D array (one value per state, in the
+            order of states) regularizes each state separately, (F + diag(lam))^-1.
         :param None | np.array time: time vector the same size as O_list
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -807,15 +810,22 @@ class SlidingFisherObservability:
 
 
 def _fisher_inverse(F, lam):
-    """(F + lam*I)^-1 for an (n, n) array F; lam='limit' takes lam -> 0 symbolically."""
+    """(F + lam*I)^-1 for an (n, n) array F; lam='limit' takes lam -> 0 symbolically.
+
+    A 1-D lam (one value per state, in F's order) gives the per-state regularizer (F + diag(lam))^-1. A uniform
+    vector gives exactly the scalar result: lam*I and diag(lam) hold the same numbers.
+    """
     n = F.shape[0]
-    if lam == 'limit':  # calculate limit with symbolic sigma
+    if isinstance(lam, str) and lam == 'limit':  # calculate limit with symbolic sigma
         sigma_sym = sp.symbols('sigma')
         F_hat = F + sp.Matrix(sigma_sym * np.eye(n))
         F_hat_inv = F_hat.inv()
         F_hat_inv_limit = F_hat_inv.applyfunc(lambda elem: sp.limit(elem, sigma_sym, 0))
         return np.array(F_hat_inv_limit, dtype=np.float64)
-    F_epsilon = F + (lam * np.eye(n))  # numeric sigma
+    if np.ndim(lam) == 0:
+        F_epsilon = F + (lam * np.eye(n))  # numeric sigma
+    else:
+        F_epsilon = F + np.diag(np.asarray(lam, dtype=float))  # per-state sigma
     return np.linalg.inv(F_epsilon)
 
 

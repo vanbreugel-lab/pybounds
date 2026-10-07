@@ -71,7 +71,7 @@ plt.show()
 
 - **Window:** `w` is the sliding-window length in time-steps. Without it, the whole trajectory is analyzed as one window.
 - **Noise:** `R` is the measurement noise variance, per sensor.
-- **Regularization `lam` (λ):** the Fisher information matrix F is inverted as (F + λI)⁻¹. `1e-8` is also the default. 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
+- **Regularization `lam` (λ):** the Fisher information matrix F is inverted as (F + λI)⁻¹. `1e-8` is also the default. 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state. When states have very different units, give each its own λ: a dict such as `lam={'g': 1e-6, 'd': 1e-10}`, or a 1-D array in the order of the selected states, replaces λI with diag(λᵢ). Selected states that the dict leaves out get the default `1e-8`. Values must be > 0, and `'limit'` is only available as a single value. With a `z_function`, use the transformed state names. A dict passed to a query may only name selected states. A dict given as the `lam` setting may also name other states, and those entries are ignored when a query doesn't select them.
 - **One-call shortcut:** `pybounds.compute_observability(sim, t, x, u, R={'r': 0.1}, w=6, lam=1e-8)` returns the same result as steps 3 and 4 in a single call, without keeping the analysis.
 
 ### Selecting states, and saving settings and results
@@ -117,6 +117,26 @@ ev_more_noise = oa.min_error_variance(Q=1e-2)   # Q, R and lam can change withou
 - **`Q`** is the per-step discrete process noise covariance. It can be a scalar, a dict per state, or an (n, n) matrix, and it must be strictly positive. Give constant parameters a small `Q` rather than zero.
 - **Linearization:** the model is linearized along the trajectory (Φ = expm(A·dt)). `-classic` uses finite differences; `-jax` uses autodiff and needs `f` and `h` written with `jax.numpy`. Because of the linearization, results differ from the `bounds-*` methods by discretization error even as Q → 0. `pybounds.stochastic` also exposes the recursions directly, for linear time-varying systems.
 - **Validation:** [validation/stochastic_duality_fig2.ipynb](validation/stochastic_duality_fig2.ipynb) checks the recursions against the paper's MATLAB code and redraws its Fig. 2.
+- **Sweeping the window size:** the linearization does not depend on `w` or on the coordinate transform. Changing only `w`, `z_function` or `z_state_names` keeps it, and the next `run()` only re-derives the windows. Changing the method or its options linearizes again.
+- **Which states need a small `Q`:** `oa.deterministic_states()` lists the states whose row of Φ is exactly eᵢ at every sample, such as constant parameters and clocks. They have no process noise physically. `oa.model_state_names` gives the names `Q` is keyed by. These are the model's own names, even when a `z_function` renames the states.
+
+#### Using a linearization computed elsewhere
+
+`oa.linearization` returns the linearized trajectory as a frozen `pybounds.Linearization` with fields `Phi` (N, n, n), `C` (N, p, n), `t_sim`, `state_names`, `sensor_names` and `bounded`. Its arrays are read-only and shared with the analysis. It is `None` for the `bounds-*` methods. `ObservabilityAnalysis.from_linearization` wraps such arrays without a simulator. It is the stochastic counterpart of `from_sliding`:
+
+```python
+oa2 = pybounds.ObservabilityAnalysis.from_linearization(
+    Phi, C, method='stochastic-constructability', w=20, t_sim=t, state_names=['g', 'd'], sensor_names=['r'],
+    R={'r': 0.1}, Q={'g': 1e-3, 'd': 1e-6})
+# or round-trip one: from_linearization(**dataclasses.asdict(oa.linearization), method=..., w=...)
+```
+
+- The arrays are kept read-only and are not copied, so analyses built from the same arrays share them.
+- A coordinate transform can be given in either of two ways:
+  - `dxdz_sliding`, with shape (n_windows, n, n), already evaluated at each window's bounded state;
+  - `z_function` plus `x_sim`, which is evaluated exactly as `run()` does it.
+- `z_state_names` names the transformed states.
+- Queries, `fisher_information`, `observability_matrix` and `save_results` behave as they do after `run()`, with bit-identical results. Only the query settings `R`, `lam`, `Q` and `alignment` can change afterwards.
 
 ### Where each window's result is placed: `alignment`
 

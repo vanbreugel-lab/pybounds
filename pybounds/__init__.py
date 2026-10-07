@@ -9,7 +9,7 @@ from .observability import ObservabilityMatrixImage
 from .observability import transform_states
 from .observability import compute_observability
 
-from .analysis import ObservabilityAnalysis
+from .analysis import ObservabilityAnalysis, Linearization
 
 from . import stochastic
 from .stochastic import (stochastic_observability_gramian, stochastic_constructability_gramian,
@@ -35,6 +35,7 @@ __all__ = [
     'transform_states',
     'compute_observability',
     'ObservabilityAnalysis',
+    'Linearization',
     'stochastic',
     'stochastic_observability_gramian',
     'stochastic_constructability_gramian',

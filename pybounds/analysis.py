@@ -91,25 +91,38 @@ class _WindowStream:
 
 
 @dataclass(frozen=True)
-class _Linearization:
+class Linearization:
     """A trajectory linearized for the stochastic methods: Phi_k = expm(A_k dt) and C_k at every sample.
 
     The windows' Fisher information is not stored: the recursions run at query time, because Q and R enter
-    them non-linearly (so neither can be factored out the way R is for F = O^T R^-1 O).
+    them non-linearly (so neither can be factored out the way R is for F = O^T R^-1 O). Nothing here depends
+    on the window size or on a coordinate transform.
+
+    ``ObservabilityAnalysis.linearization`` returns one, with read-only arrays shared with the analysis, and
+    ``ObservabilityAnalysis.from_linearization(**fields, method=..., w=...)`` wraps one again. Note that
+    ``dataclasses.asdict`` deep-copies the arrays; ``{f.name: getattr(lin, f.name) for f in dataclasses.fields(lin)}``
+    shares them.
+
+    :param Phi: (N, n, n) transition matrices; Phi[k] maps x_k -> x_{k+1}
+    :param C: (N, p, n) measurement Jacobians
+    :param t_sim: (N,) time of every sample, or None
+    :param state_names: the model's own state names (the names Q is keyed by), in state-vector order
+    :param sensor_names: the measurement names, in row order of C
+    :param bounded: 'initial' (stochastic observability) or 'final' (stochastic constructability): the state
+        each window's result bounds
     """
-    Phi: np.ndarray            # (N, n, n)
-    C: np.ndarray              # (N, p, n)
-    t_sim: np.ndarray
-    w: int
-    state_names: list
-    sensor_names: list
-    bounded: str               # 'initial' (observability) or 'final' (constructability)
+    Phi: np.ndarray
+    C: np.ndarray
+    t_sim: np.ndarray = None
+    state_names: tuple = None
+    sensor_names: tuple = None
+    bounded: str = 'initial'
 
 
 class _Builder(NamedTuple):
     # func(simulator, t_sim, x_sim, u_sim, *, w, stream, **options) -> SlidingO, or a _WindowStream when
     # stream=True (a builder may also return a SlidingO then, e.g. when it computes all windows at once),
-    # or a _Linearization for the stochastic methods
+    # or a Linearization for the stochastic methods (which does not depend on w)
     func: Callable
     options: frozenset      # option names the builder accepts
 
@@ -309,11 +322,7 @@ def _make_stochastic_builder(bounded, backend):
         if isinstance(u_sim, dict):
             u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T
         u_sim = np.asarray(u_sim, dtype=float).reshape(N, -1)
-        w = N if w is None else int(w)
-        if w < 1:
-            raise ValueError(f'window size ({w}) must be at least 1')
-        if w > N:
-            raise ValueError(f'window size ({w}) must be smaller than trajectory length ({N})')
+        _window_size(w, N)   # fail before the (possibly slow) linearization
 
         if backend == 'classic' and _is_jax_simulator(simulator):
             from .jax_simulator import _x64   # f_jax / h_jax evaluated in float64, as JaxSimulator does
@@ -329,8 +338,8 @@ def _make_stochastic_builder(bounded, backend):
         if len(state_names) != n or len(sensor_names) != p:
             raise ValueError(f'the model has {n} states and {p} measurements, but the simulator names '
                              f'{len(state_names)} states and {len(sensor_names)} measurements')
-        return _Linearization(Phi=Phi, C=C, t_sim=t_sim, w=w, state_names=state_names,
-                              sensor_names=sensor_names, bounded=bounded)
+        return Linearization(Phi=Phi, C=C, t_sim=t_sim, state_names=tuple(state_names),
+                             sensor_names=tuple(sensor_names), bounded=bounded)
 
     return build
 
@@ -351,6 +360,33 @@ _METHOD_ALIASES = {'empirical': 'bounds-empirical', 'jax': 'bounds-jax'}
 
 # Where each window's minimum error variance is placed along the trajectory (see ObservabilityAnalysis)
 ALIGNMENTS = ('center', 'bounded_state')
+
+
+# The stochastic method names from_linearization accepts: the backend suffix only says how Phi and C were made
+_STOCHASTIC_KINDS = {'stochastic-observability': 'initial', 'stochastic-constructability': 'final'}
+
+
+def _bounded_of(method):
+    """'final' for the stochastic constructability methods, 'initial' for every other method."""
+    return 'final' if isinstance(method, str) and method.startswith('stochastic-constructability') else 'initial'
+
+
+def _window_size(w, N):
+    """The window size for a trajectory of N samples (None: the whole trajectory), validated."""
+    w = N if w is None else int(w)
+    if w < 1:
+        raise ValueError(f'window size ({w}) must be at least 1')
+    if w > N:
+        raise ValueError(f'window size ({w}) must be smaller than trajectory length ({N})')
+    return w
+
+
+def _read_only(x):
+    """x as a read-only float array, without a copy when it already is a float array (the view is read-only,
+    the caller's array is left as it is)."""
+    view = np.asarray(x, dtype=float).view()
+    view.flags.writeable = False
+    return view
 
 
 def _canonical_method(method):
@@ -509,6 +545,10 @@ def _coerce_numbers(settings):
     for key in ('lam', 'eps'):
         if key in settings:
             settings[key] = _number(settings[key])
+    if isinstance(settings.get('lam'), dict):
+        settings['lam'] = {k: _number(v) for k, v in settings['lam'].items()}
+    elif isinstance(settings.get('lam'), list):
+        settings['lam'] = [_number(v) for v in settings['lam']]
     if isinstance(settings.get('w'), (str, float)):
         settings['w'] = int(float(settings['w']))
     for key in ('R', 'Q'):
@@ -540,6 +580,9 @@ class ObservabilityAnalysis:
     any selection of states, sensors and time-steps without rebuilding O. Selecting states
     is conditional: the other states are treated as known (as in FisherObservability).
 
+    To wrap results computed elsewhere, without a simulator: ``from_sliding`` (observability matrices) and
+    ``from_linearization`` (a linearized trajectory, for the stochastic methods).
+
     :param simulator: a pybounds Simulator, a JaxSimulator, or a custom simulator object
     :param t_sim: time of every point of the trajectory, shape (N,)
     :param x_sim: state trajectory, (N, n) array or dict of state name -> (N,) array
@@ -567,8 +610,13 @@ class ObservabilityAnalysis:
     :param list z_state_names: names of the transformed states
     :param R: default measurement noise covariance for queries (scalar, dict per sensor, or matrix);
         None means identity
-    :param float | str lam: default regularization for inverting F; 1/lam is the ceiling on the
-        minimum error variance. 'limit' computes lam -> 0 symbolically
+    :param float | str | dict | np.ndarray lam: default regularization for inverting F; 1/lam is the ceiling on
+        the minimum error variance. 'limit' computes lam -> 0 symbolically. A per-state regularizer
+        diag(lam_i) replaces lam*I when lam is a dict of state name -> value or a 1-D array in the order of the
+        selected states (with a z_function, the transformed names: the regularizer is added after the change of
+        coordinates). Selected states a dict leaves out get the package default, DEFAULT_LAM (1e-8). Values must
+        be > 0. As a query argument, a dict may only name selected states; as this setting it may also name other
+        states, which are ignored for queries that do not select them
     :param Q: default process noise covariance for queries, stochastic methods only (ignored otherwise): the
         per-step discrete covariance, used at every step. A scalar (q * I), a dict of state name -> variance
         covering every state, or an (n, n) matrix. Keyed by the model's own state names even when z_function is
@@ -668,6 +716,67 @@ class ObservabilityAnalysis:
         self._store(_from_sliding_object(obj))
         return self
 
+    @classmethod
+    def from_linearization(cls, Phi, C, *, method, w, t_sim=None, state_names=None, sensor_names=None,
+                           bounded=None, z_state_names=None, dxdz_sliding=None, z_function=None, x_sim=None,
+                           R=None, lam=DEFAULT_LAM, Q=None, alignment='center'):
+        """Wrap a linearized trajectory computed elsewhere, for the stochastic methods (no simulator needed).
+
+        The stochastic counterpart of from_sliding: queries, fisher_information, observability_matrix and
+        save_results then behave exactly as after run(), and give bit-identical results for the same Phi and C.
+        Only the query settings (R, lam, Q, alignment) can be changed afterwards.
+
+        :param Phi: (N, n, n) transition matrices; Phi[k] maps x_k -> x_{k+1}. Kept read-only, not copied (when
+            already a float array): analyses built from the same arrays share them
+        :param C: (N, p, n) measurement Jacobians, kept like Phi
+        :param str method: 'stochastic-observability' or 'stochastic-constructability' (a backend suffix,
+            '-classic' or '-jax', may be included)
+        :param int w: window size in time-steps; None uses the whole trajectory (one window)
+        :param t_sim: (N,) time of every sample (None: time in samples)
+        :param list state_names: the model's own state names (default x_0, x_1, ...); Q is keyed by these
+        :param list sensor_names: the measurement names (default y_0, y_1, ...)
+        :param str bounded: optional, 'initial' or 'final'; must agree with method if given (it lets the fields of
+            ``analysis.linearization`` be passed straight back in)
+        :param list z_state_names: names of the transformed states, with dxdz_sliding or z_function
+        :param dxdz_sliding: (n_windows, n, n) dx/dz of a coordinate transform, already evaluated at each window's
+            bounded state (its first sample, or its last for constructability)
+        :param callable z_function: alternatively, the transform z = z_function(x) (sympy), evaluated at each
+            window's bounded state of x_sim exactly as run() does
+        :param x_sim: (N, n) array or dict of state name -> (N,) array, needed with z_function
+        :param R: default measurement noise (scalar, or dict per sensor)
+        :param lam: default regularization, see the class docstring
+        :param Q: default process noise covariance, see the class docstring
+        :param str alignment: where each window's result is placed, see the class docstring
+        """
+        if not isinstance(method, str) or not _is_stochastic(method) or not (
+                method in _STOCHASTIC_KINDS or method in _BUILDERS):
+            raise ValueError(f'from_linearization needs a stochastic method, one of {list(_STOCHASTIC_KINDS)} '
+                             f'(optionally with a -classic or -jax suffix); got {method!r}')
+        if bounded is not None and bounded != _bounded_of(method):
+            raise ValueError(f'bounded={bounded!r} does not match method {method!r}, which bounds the '
+                             f"{_bounded_of(method)} state")
+        if dxdz_sliding is not None and z_function is not None:
+            raise ValueError('give the coordinate transform either as dxdz_sliding or as z_function (with x_sim), '
+                             'not both')
+        if z_function is not None and x_sim is None:
+            raise ValueError('z_function needs x_sim, the states it is evaluated at')
+        if z_state_names is not None and dxdz_sliding is None and z_function is None:
+            raise ValueError('z_state_names names transformed states: give dxdz_sliding or z_function too')
+        cls._validate_alignment(alignment)
+        self = cls.__new__(cls)
+        self.simulator = None
+        self._t_sim_in, self._x_sim_in, self._u_sim_in = t_sim, x_sim, None
+        self._external = True
+        self._settings = {'method': method, 'w': w, 'aux_list': None, 'z_function': z_function,
+                          'z_state_names': z_state_names, 'storage': 'observability', 'fisher_sensors': None,
+                          'keep_source': False, 'R': R, 'lam': lam, 'Q': Q, 'alignment': alignment}
+        self._method_options = {}
+        self._discard_results()
+        self._store_linearization(Linearization(Phi=Phi, C=C, t_sim=t_sim, state_names=state_names,
+                                                sensor_names=sensor_names, bounded=_bounded_of(method)),
+                                  dxdz_sliding=dxdz_sliding)
+        return self
+
     # ------------------------------------------------------------------ settings
 
     @property
@@ -683,6 +792,8 @@ class ObservabilityAnalysis:
         """Change settings. Changing any O-building setting (method, w, aux_list, z_function,
         z_state_names or a method option) discards computed results, so call run() again.
         The query settings (R, lam, Q, alignment) keep them.
+        For the stochastic methods, changing only w, z_function or z_state_names keeps the linearized trajectory,
+        which depends on none of them: the next run() re-derives the windows from it without linearizing again.
         Setting a method option to None removes it, so the builder's default applies."""
         if not settings:
             return self
@@ -698,9 +809,10 @@ class ObservabilityAnalysis:
             else:
                 new_options[key] = value
 
-        o_changed = any(k not in self._QUERY_SETTINGS for k in settings)
+        o_keys = [k for k in settings if k not in self._QUERY_SETTINGS]
+        o_changed = bool(o_keys)
         if o_changed and self._external:
-            raise ValueError('this analysis wraps existing observability matrices (from_sliding); '
+            raise ValueError('this analysis wraps precomputed results (from_sliding / from_linearization); '
                              f'only the query settings ({", ".join(self._QUERY_SETTINGS)}) can be changed')
         if new_settings['method'] is None:
             new_settings['method'] = _default_method(self.simulator)
@@ -710,13 +822,21 @@ class ObservabilityAnalysis:
             self._validate_method(new_settings['method'], new_options, new_settings['aux_list'])
             self._validate_method_storage(new_settings['method'], new_settings['storage'])
 
+        # the linearization depends on the trajectory, the method and its options only
+        keep_linearization = (self._lin is not None and _is_stochastic(new_settings['method'])
+                              and all(k in self._LINEARIZATION_FREE
+                                      or (k == 'method' and new_settings['method'] == self._settings['method'])
+                                      for k in o_keys))
         self._settings = new_settings
         self._method_options = new_options
         if o_changed:
-            self._discard_results()
+            self._discard_results(keep_linearization=keep_linearization)
         else:
             self.clear_cache()
         return self
+
+    # O-building settings that a stochastic method's linearization does not depend on
+    _LINEARIZATION_FREE = ('w', 'z_function', 'z_state_names')
 
     # ------------------------------------------------------------------ settings files (YAML)
 
@@ -859,13 +979,16 @@ class ObservabilityAnalysis:
         methods: linearize the model along the trajectory). Returns self."""
         if self._external:
             return self
+        if self._lin is not None and not self.is_computed:   # kept through a change of w or z: re-derive only
+            self._store_linearization(self._lin)
+            return self
         builder = _BUILDERS[self.method]
         options = dict(self._method_options)
         if self._settings['aux_list'] is not None:
             options['aux_list'] = self._settings['aux_list']
         result = builder.func(self.simulator, self._t_sim_in, self._x_sim_in, self._u_sim_in,
                               w=self._settings['w'], stream=not self._settings['keep_source'], **options)
-        if isinstance(result, _Linearization):
+        if isinstance(result, Linearization):
             self._store_linearization(result)
         else:
             self._store(result)
@@ -897,9 +1020,10 @@ class ObservabilityAnalysis:
 
         if storage == 'observability' and z_function is None and materialized is not None:
             O, index, state_names = materialized   # already one array: keep it without a copy
-            dxdz_sliding = None
+            model_state_names, dxdz_sliding = state_names, None
         else:
-            O, index, state_names, dxdz_sliding = self._assemble(windows, n_windows, O_index, storage)
+            O, index, state_names, model_state_names, dxdz_sliding = self._assemble(windows, n_windows, O_index,
+                                                                                   storage)
 
         self._index = index
         self._n_windows = n_windows
@@ -911,6 +1035,7 @@ class ObservabilityAnalysis:
             self._F = O
             self._O = None
         self._state_names = state_names
+        self._model_state_names = list(model_state_names)
         self._dxdz_sliding = dxdz_sliding
         self._sensor_names = list(pd.unique(np.asarray(index.get_level_values('sensor'), dtype=object)))
         self._time_steps = sorted(int(k) for k in pd.unique(index.get_level_values('time_step')))
@@ -928,37 +1053,73 @@ class ObservabilityAnalysis:
             warnings.warn('z_function is set without z_state_names, so the transformed states are named '
                           '0, 1, 2, ...', UserWarning, stacklevel=4)
 
-    def _store_linearization(self, lin):
-        """Keep a stochastic method's linearized trajectory; the recursions run at query time."""
-        w = int(lin.w)
-        n_windows = lin.Phi.shape[0] - w + 1
-        n, p = lin.Phi.shape[1], lin.C.shape[1]
-        state_names = list(lin.state_names)
-        dxdz_sliding = None
-        if self._settings['z_function'] is not None:
-            self._warn_unnamed_z()
+    def _store_linearization(self, lin, dxdz_sliding=None):
+        """Keep a stochastic method's linearized trajectory and derive its windows (and coordinate transform)
+        from the current settings; the recursions run at query time.
+
+        :param Linearization lin: Phi and C are kept read-only without a copy
+        :param dxdz_sliding: optional (n_windows, n, n) dx/dz at each window's bounded state, used instead of
+            evaluating z_function
+        """
+        Phi, C = _read_only(lin.Phi), _read_only(lin.C)
+        if Phi.ndim != 3 or Phi.shape[1] != Phi.shape[2]:
+            raise ValueError(f'Phi must have shape (N, n, n), got {Phi.shape}')
+        N, n = Phi.shape[0], Phi.shape[1]
+        if C.ndim != 3 or C.shape[0] != N or C.shape[2] != n:
+            raise ValueError(f'C must have shape ({N}, p, {n}) to match Phi {Phi.shape}, got {C.shape}')
+        p = C.shape[1]
+        if lin.bounded not in ('initial', 'final'):
+            raise ValueError(f"bounded must be 'initial' or 'final', got {lin.bounded!r}")
+        model_state_names = list(lin.state_names) if lin.state_names is not None else [f'x_{i}' for i in range(n)]
+        sensor_names = list(lin.sensor_names) if lin.sensor_names is not None else [f'y_{i}' for i in range(p)]
+        if len(model_state_names) != n or len(sensor_names) != p:
+            raise ValueError(f'Phi and C describe {n} states and {p} measurements, but {len(model_state_names)} '
+                             f'state names and {len(sensor_names)} sensor names were given')
+        t_sim = None
+        if lin.t_sim is not None:
+            t_sim = _read_only(np.ravel(np.asarray(lin.t_sim)))
+            if t_sim.shape[0] != N:
+                raise ValueError(f't_sim has {t_sim.shape[0]} samples, Phi has {N}')
+        w = _window_size(self._settings['w'], N)
+        n_windows = N - w + 1
+
+        state_names = model_state_names
+        z_state_names = self._settings['z_state_names']
+        if dxdz_sliding is not None:
+            dxdz_sliding = _read_only(dxdz_sliding)
+            if dxdz_sliding.shape != (n_windows, n, n):
+                raise ValueError(f'dxdz_sliding must have shape ({n_windows}, {n}, {n}) (one dx/dz per window), '
+                                 f'got {dxdz_sliding.shape}')
+        elif self._settings['z_function'] is not None:
             # each window is transformed at the state it bounds: its first sample, or its last for constructability
             reference = np.arange(n_windows) + (w - 1 if lin.bounded == 'final' else 0)
-            x = self._trajectory_states(n)
+            x = self._trajectory_states(n, model_state_names)
             dzdx_function = _z_jacobian_function(self._settings['z_function'], n)
-            dxdz_sliding = [np.linalg.inv(dzdx_function(np.array(x[i]))) for i in reference]
-            z_state_names = self._settings['z_state_names']
+            dxdz_sliding = _read_only(np.stack([np.linalg.inv(dzdx_function(np.array(x[i]))) for i in reference]))
+        if dxdz_sliding is not None:
+            if self._settings['z_function'] is not None:
+                self._warn_unnamed_z()
+            elif z_state_names is None:
+                warnings.warn('dxdz_sliding is set without z_state_names, so the transformed states are named '
+                              '0, 1, 2, ...', UserWarning, stacklevel=4)
             state_names = list(z_state_names) if z_state_names is not None else list(range(n))
+            if len(state_names) != n:
+                raise ValueError(f'z_state_names must name {n} states, got {len(state_names)}')
 
-        Phi, C = np.array(lin.Phi, dtype=float), np.array(lin.C, dtype=float)
-        Phi.flags.writeable = C.flags.writeable = False
+        self._lin = Linearization(Phi=Phi, C=C, t_sim=t_sim, state_names=tuple(model_state_names),
+                                  sensor_names=tuple(sensor_names), bounded=lin.bounded)
         self._Phi, self._C = Phi, C
-        self._model_state_names = list(lin.state_names)
+        self._model_state_names = model_state_names
         self._bounded = lin.bounded
-        self._index = pd.MultiIndex.from_arrays([list(lin.sensor_names) * w, np.repeat(np.arange(w), p).astype(int)],
+        self._index = pd.MultiIndex.from_arrays([sensor_names * w, np.repeat(np.arange(w), p).astype(int)],
                                                 names=['sensor', 'time_step'])
         self._n_windows = n_windows
         self._O = self._F = None
         self._state_names = state_names
         self._dxdz_sliding = dxdz_sliding
-        self._sensor_names = list(lin.sensor_names)
+        self._sensor_names = sensor_names
         self._time_steps = list(range(w))
-        self._t_sim = None if lin.t_sim is None else np.ravel(np.asarray(lin.t_sim))
+        self._t_sim = t_sim
         self._O_index = np.arange(n_windows)
         self._w = w
         self._source = self._window_data = None
@@ -1007,7 +1168,7 @@ class ObservabilityAnalysis:
             count += 1
         if count != n_windows:
             raise ValueError(f'the builder produced {count} windows, expected {n_windows}')
-        return out, index0, state_names if z_function is not None else names0, dxdz_sliding
+        return out, index0, state_names if z_function is not None else names0, names0, dxdz_sliding
 
     def _transform_window(self, O_k, index, state_names, x0):
         """One window in z coordinates at its initial state: (O_z, z state names, dx/dz)."""
@@ -1017,15 +1178,18 @@ class ObservabilityAnalysis:
         frame_z, dxdz = _transform_O_df(frame, x0, self._dzdx_function, self._settings['z_state_names'])
         return frame_z.to_numpy(dtype=float), list(frame_z.columns), dxdz
 
-    def _trajectory_states(self, n):
-        """x_sim as an (N, n) array, in the simulator's state order."""
+    def _trajectory_states(self, n, state_names=None):
+        """x_sim as an (N, n) array, in the simulator's state order (or state_names', when given)."""
         x_sim = self._x_sim_in
         if isinstance(x_sim, dict):
-            x_sim = np.vstack(_ordered_values(x_sim, getattr(self.simulator, 'state_names', None), 'x_sim')).T
+            names = state_names if state_names is not None else getattr(self.simulator, 'state_names', None)
+            x_sim = np.vstack(_ordered_values(x_sim, names, 'x_sim')).T
         x_sim = np.asarray(x_sim, dtype=float)
         return x_sim.reshape(x_sim.shape[0], n)
 
-    def _discard_results(self):
+    def _discard_results(self, keep_linearization=False):
+        if not keep_linearization:
+            self._lin = None   # a stochastic method's linearized trajectory, reusable when only w or z change
         self._O = self._index = self._n_windows = None
         self._F = self._F_groups = None
         self._dzdx_function = None
@@ -1122,6 +1286,34 @@ class ObservabilityAnalysis:
         return None if self._dxdz_sliding is None else [d.copy() for d in self._dxdz_sliding]
 
     @property
+    def model_state_names(self):
+        """The model's own state names, in state-vector order: the names Q is keyed by. They equal state_names
+        unless a coordinate transform (z_function) renames the states."""
+        return list(self._computed(self._model_state_names))
+
+    @property
+    def linearization(self):
+        """The linearized trajectory of a stochastic method (a frozen Linearization: Phi, C, t_sim, state_names in
+        the model's own coordinates, sensor_names, bounded), with read-only arrays shared with this analysis.
+        None for the bounds-* methods."""
+        self._require_computed()
+        return self._lin if self._Phi is not None else None
+
+    def deterministic_states(self, atol=1e-12):
+        """The model states whose row of Phi is e_i at every sample (to within atol): states whose evolution does
+        not depend on the state vector, such as constant parameters (x_dot = 0) and clocks (t_dot = 1). They have
+        no process noise physically, so they are the ones to give a much smaller Q. Stochastic methods only.
+
+        :return: list of state names in the model's own coordinates (the names Q is keyed by)
+        """
+        self._require_computed()
+        if self._Phi is None:
+            raise ValueError(f'deterministic_states reads the linearized trajectory (Phi), which method '
+                             f'{self.method!r} does not build')
+        deviation = np.abs(self._Phi - np.eye(self._Phi.shape[1])).max(axis=0).max(axis=1)
+        return [name for name, d in zip(self._model_state_names, deviation) if d <= atol]
+
+    @property
     def source(self):
         """The builder's native object, e.g. the SlidingEmpiricalObservabilityMatrix (only with
         keep_source=True). O is untransformed there."""
@@ -1156,14 +1348,43 @@ class ObservabilityAnalysis:
             time_steps = [int(k) for k in time_steps]
         return states, sensors, time_steps
 
-    def _resolve(self, R, lam, sensors):
+    def _resolve(self, R, lam, sensors, states=None):
         R = self._settings['R'] if R is _UNSET else R
-        lam = self._settings['lam'] if lam is _UNSET else lam
+        lam = self._resolve_lam(lam, states)
         if isinstance(R, dict):
             missing = [s for s in (sensors or self._sensor_names) if s not in R]
             if missing:
                 raise ValueError(f'R has no noise level for sensors {missing}')
         return R, lam
+
+    def _resolve_lam(self, lam, states):
+        """lam for a query: a scalar (or 'limit') unchanged, or a per-state regularizer as a 1-D array in the order
+        of the selected states. From a dict, selected states it leaves out get DEFAULT_LAM; a dict passed to the
+        query may name only selected states, the lam setting may also name other (existing) states."""
+        from_setting = lam is _UNSET
+        lam = self._settings['lam'] if from_setting else lam
+        if not isinstance(lam, dict) and (isinstance(lam, str) or lam is None or np.ndim(lam) == 0):
+            return lam
+        names = list(states) if states is not None else list(self._state_names)
+        if isinstance(lam, dict):
+            unknown = [k for k in lam if k not in self._state_names]
+            unselected = [k for k in lam if k in self._state_names and k not in names]
+            if unknown or (unselected and not from_setting):
+                raise ValueError(f'lam names states that are not selected: {unknown + unselected}; selected states: '
+                                 f'{names}')
+            values = [lam.get(x, DEFAULT_LAM) for x in names]
+        else:
+            values = lam
+        try:
+            values = np.array(values, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError("a per-state lam must hold numbers ('limit' is only available as a scalar)") from None
+        if values.ndim != 1 or len(values) != len(names):
+            raise ValueError(f'a per-state lam must have one value per selected state ({len(names)}: {names}), '
+                             f'got shape {values.shape}')
+        if not np.all(np.isfinite(values) & (values > 0)):
+            raise ValueError(f'every per-state lam must be > 0, got {values.tolist()}')
+        return values
 
     def _resolve_Q(self, Q):
         """Q for a query: the setting unless given, and only for the stochastic methods (None otherwise)."""
@@ -1191,7 +1412,7 @@ class ObservabilityAnalysis:
         Selections default to all states, sensors and time-steps; R, lam and alignment default to the settings.
         """
         states, sensors, time_steps = self._select(states, sensors, time_steps)
-        R, lam = self._resolve(R, lam, sensors)
+        R, lam = self._resolve(R, lam, sensors, states)
         alignment = self._resolve_alignment(alignment)
         if self._Phi is not None:
             raise ValueError(f"fisher() builds per-window FisherObservability objects from observability matrices, "
@@ -1223,7 +1444,7 @@ class ObservabilityAnalysis:
         selected. R, lam and Q (stochastic methods only) default to the settings. Results are cached.
         """
         states_l, sensors_l, time_steps_l = self._select(states, sensors, time_steps)
-        R_r, lam_r = self._resolve(R, lam, sensors_l)
+        R_r, lam_r = self._resolve(R, lam, sensors_l, states_l)
         Q_r = self._resolve_Q(Q)
         alignment_r = self._resolve_alignment(alignment)
         key = tuple(_freeze(v) for v in (states_l, sensors_l, time_steps_l, R_r, lam_r, bool(force_R_scalar),
@@ -1259,7 +1480,7 @@ class ObservabilityAnalysis:
         storage mode. With storage='observability' each window equals fisher(...).FO[k].F exactly.
         """
         states, sensors, _ = self._select(states, sensors, None)
-        R, _ = self._resolve(R, _UNSET, sensors)
+        R, _ = self._resolve(R, DEFAULT_LAM, sensors)
         Q = self._resolve_Q(Q)
         if self._Phi is not None:
             return self._stochastic_fisher(states, sensors, None, R, Q, force_R_scalar)
@@ -1422,7 +1643,7 @@ class ObservabilityAnalysis:
         Qinv = np.linalg.inv(self._process_noise(Q))
         F = _stochastic.sliding_gramians(self._Phi, C, self._w, Qinv, Rinvs, bounded=self._bounded)
         if self._dxdz_sliding is not None:
-            dxdz = np.stack(self._dxdz_sliding)
+            dxdz = np.asarray(self._dxdz_sliding)
             F = np.swapaxes(dxdz, -1, -2) @ F @ dxdz
             F = 0.5 * (F + np.swapaxes(F, -1, -2))
         if states is not None:
@@ -1437,10 +1658,11 @@ class ObservabilityAnalysis:
         # variance. O^T R^-1 O is PSD by construction, so clip for a comparable inverse.
         eigenvalues, eigenvectors = np.linalg.eigh(F)
         F = (eigenvectors * np.clip(eigenvalues, 0.0, None)[:, None, :]) @ np.swapaxes(eigenvectors, -1, -2)
-        if lam == 'limit':
+        if isinstance(lam, str) and lam == 'limit':
             values = np.array([np.diag(_fisher_inverse(F_k, lam)) for F_k in F])
-        else:
-            values = np.diagonal(np.linalg.inv(F + lam * np.eye(F.shape[-1])), axis1=-2, axis2=-1)
+        else:   # the regularizer is added after the clip
+            regularizer = lam * np.eye(F.shape[-1]) if np.ndim(lam) == 0 else np.diag(lam)
+            values = np.diagonal(np.linalg.inv(F + regularizer), axis1=-2, axis2=-1)
         return self._aligned_error_variance(values, states or self._state_names, shift_index)
 
     def observability_matrix(self, window=0, states=None, sensors=None, time_steps=None):
@@ -1532,7 +1754,7 @@ class ObservabilityAnalysis:
             'observability_matrices'
         """
         states_l, sensors_l, time_steps_l = self._select(states, sensors, time_steps)
-        R_r, lam_r = self._resolve(R, lam, sensors_l)
+        R_r, lam_r = self._resolve(R, lam, sensors_l, states_l)
         Q_r = self._resolve_Q(Q)
         alignment_r = self._resolve_alignment(alignment)
         if include_observability_matrices and self._Phi is not None:

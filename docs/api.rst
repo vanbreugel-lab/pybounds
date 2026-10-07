@@ -32,6 +32,8 @@ Observability
 
 .. autofunction:: pybounds.compute_observability
 
+.. autoclass:: pybounds.Linearization
+
 Stochastic observability and constructability
 ---------------------------------------------
 
