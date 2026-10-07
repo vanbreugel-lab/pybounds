@@ -488,6 +488,9 @@ class TestZFunction:
                                               w=WINDOW_SIZE, R=0.1, Q=1e-4).run().fisher_information()
         np.testing.assert_allclose(oa.fisher_information()[k], inv(dzdx).T @ untransformed[k] @ inv(dzdx),
                                    rtol=1e-10)
+        # exactly the congruence with the stored dx/dz, without re-symmetrizing
+        dxdz = np.stack(oa.dxdz_sliding)
+        np.testing.assert_array_equal(oa.fisher_information(), np.swapaxes(dxdz, 1, 2) @ untransformed @ dxdz)
         # the transformed matrix's rows are sensitivities to z
         O = oa.observability_matrix(k)
         assert list(O.columns) == ['of', 'd']

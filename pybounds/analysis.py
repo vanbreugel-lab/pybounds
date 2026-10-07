@@ -1645,7 +1645,6 @@ class ObservabilityAnalysis:
         if self._dxdz_sliding is not None:
             dxdz = np.asarray(self._dxdz_sliding)
             F = np.swapaxes(dxdz, -1, -2) @ F @ dxdz
-            F = 0.5 * (F + np.swapaxes(F, -1, -2))
         if states is not None:
             idx = [self._state_names.index(x) for x in states]
             F = F[:, idx][:, :, idx]
