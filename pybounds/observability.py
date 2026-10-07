@@ -105,7 +105,8 @@ def _reject_jax_simulator(simulator, cls_name):
     jax_module = sys.modules.get(f'{__package__}.jax_simulator')
     if jax_module is not None and isinstance(simulator, jax_module.JaxSimulator):
         raise TypeError(f'{cls_name} does not accept a JaxSimulator; use Jax{cls_name} instead '
-                        '(or compute_observability(..., use_jax=True)).')
+                        '(compute_observability: use_jax=True, or leave use_jax unset to pick the backend from '
+                        'the simulator).')
 
 
 def _ordered_values(d, names, label):
@@ -383,7 +384,8 @@ class SlidingEmpiricalObservabilityMatrix:
         if isinstance(u_sim, dict):
             self.u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T
         else:
-            self.u_sim = np.array(u_sim)
+            u_sim = np.array(u_sim)
+            self.u_sim = u_sim.reshape(u_sim.shape[0], -1)  # (N, m), also for a single input
 
         # Check sizes
         if self.N != self.x_sim.shape[0]:
@@ -560,6 +562,8 @@ class FisherObservability:
             lam is absolute, so it should be small relative to the eigenvalues of F, which scale with 1/R
             and with the units of each state. Default 1e-8 (ceiling of 1e8).
             If lam='limit', compute the limit lam -> 0 symbolically.
+            A 1-D array (one value per state, in the order of states) regularizes each state separately,
+            (F + diag(lam))^-1.
         :param bool force_R_scalar: force R to be a scalar, useful when the resulting R matrix is too big to fit in memory
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -732,7 +736,8 @@ class FisherObservability:
 
 class SlidingFisherObservability:
     def __init__(self, O_list, R=None, lam=DEFAULT_LAM, time=None,
-                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False, keep_windows=True):
+                 states=None, sensors=None, time_steps=None, w=None, force_R_scalar=False, keep_windows=True,
+                 shift_index=None):
 
         """ Compute the Fisher information matrix & inverse in sliding windows and pull put the minimum error variance.
 
@@ -744,7 +749,8 @@ class SlidingFisherObservability:
             if None, then R = I_(nxn)
         :param float | str lam: regularization for inverting F in each window, computed as (F + lam*I)^-1.
             1/lam is the ceiling on the minimum error variance (see FisherObservability). Default 1e-8.
-            If lam='limit', compute the limit lam -> 0 symbolically.
+            If lam='limit', compute the limit lam -> 0 symbolically. A 1-D array (one value per state, in the
+            order of states) regularizes each state separately, (F + diag(lam))^-1.
         :param None | np.array time: time vector the same size as O_list
         :param None | tuple | list states: list of states to use from O's. ex: ['g', 'd']
         :param None | tuple | list sensors: list of sensors to use from O's, ex: ['r']
@@ -754,6 +760,8 @@ class SlidingFisherObservability:
         :param bool force_R_scalar: force R to be a scalar in each window (see FisherObservability)
         :param bool keep_windows: keep each window's FisherObservability object in self.FO. With False, only
             the error variance is kept (self.FO stays empty), so memory does not grow with the number of windows
+        :param None | int shift_index: how many time-steps past its start each window's result is placed.
+            None (default) places it at the window's center, w // 2
         """
 
         self.O_list = O_list
@@ -793,7 +801,7 @@ class SlidingFisherObservability:
             self.EV.append(ev)
 
         # Concatenate error variance & make same size as simulation data
-        self.shift_index = int(FO.w) // 2
+        self.shift_index = int(FO.w) // 2 if shift_index is None else int(shift_index)
         self.shift_time = self.shift_index * self.dt
         self.EV, self.EV_aligned = _align_error_variance(pd.concat(self.EV, axis=0, ignore_index=True),
                                                          self.time, self.shift_index, self.shift_time,
@@ -804,23 +812,30 @@ class SlidingFisherObservability:
 
 
 def _fisher_inverse(F, lam):
-    """(F + lam*I)^-1 for an (n, n) array F; lam='limit' takes lam -> 0 symbolically."""
+    """(F + lam*I)^-1 for an (n, n) array F; lam='limit' takes lam -> 0 symbolically.
+
+    A 1-D lam (one value per state, in F's order) gives the per-state regularizer (F + diag(lam))^-1. A uniform
+    vector gives exactly the scalar result: lam*I and diag(lam) hold the same numbers.
+    """
     n = F.shape[0]
-    if lam == 'limit':  # calculate limit with symbolic sigma
+    if isinstance(lam, str) and lam == 'limit':  # calculate limit with symbolic sigma
         sigma_sym = sp.symbols('sigma')
         F_hat = F + sp.Matrix(sigma_sym * np.eye(n))
         F_hat_inv = F_hat.inv()
         F_hat_inv_limit = F_hat_inv.applyfunc(lambda elem: sp.limit(elem, sigma_sym, 0))
         return np.array(F_hat_inv_limit, dtype=np.float64)
-    F_epsilon = F + (lam * np.eye(n))  # numeric sigma
+    if np.ndim(lam) == 0:
+        F_epsilon = F + (lam * np.eye(n))  # numeric sigma
+    else:
+        F_epsilon = F + np.diag(np.asarray(lam, dtype=float))  # per-state sigma
     return np.linalg.inv(F_epsilon)
 
 
 def _align_error_variance(EV, time, shift_index, shift_time, aligned):
     """Place one row per window (columns 'time_initial' + states) on the trajectory's time axis.
 
-    Each window is shifted forward by half its size (floor division puts odd windows at their center
-    time-step (w-1)/2). Returns (EV with the shifted index, EV_aligned with a 'time' column).
+    Each window is shifted forward by shift_index time-steps (by default half its size: floor division puts
+    odd windows at their center time-step (w-1)/2). Returns (EV with the shifted index, EV_aligned with a 'time' column).
     """
     if aligned:  # align windows with the time vector
         EV.index = np.arange(shift_index, EV.shape[0] + shift_index, step=1, dtype=int)
@@ -924,8 +939,16 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_d
 
 
 class ObservabilityMatrixImage:
-    def __init__(self, O, state_names=None, sensor_names=None, vmax_percentile=100, vmin_ratio=1.0, cmap='bwr'):
+    def __init__(self, O, state_names=None, sensor_names=None, vmax_percentile=100, vmin_ratio=0.0, cmap='bwr'):
         """ Display an image of an observability matrix.
+
+        :param pd.DataFrame O: observability matrix with a ('sensor', 'time_step') row index and one column per state
+        :param list state_names: axis labels for the states (length n, or length 1 for a numbered name)
+        :param list sensor_names: axis labels for the sensors (length p, or length 1 for a numbered name)
+        :param float vmax_percentile: default for plot(): percentile of |O| used as the color range
+        :param float vmin_ratio: default for plot(): entries smaller than vmin_ratio * the color range (and larger
+            than 1e-6) are drawn at that magnitude, so small values stay visible
+        :param str cmap: default for plot(): matplotlib colormap
         """
 
         # Plotting parameters
@@ -950,8 +973,9 @@ class ObservabilityMatrixImage:
             self.time_steps = np.array(O.index.get_level_values('time_step'))
             self.sensor_names_default = list(pd.unique(np.array(self.sensors, dtype=object)))
             self.time_steps_default = np.unique(self.time_steps)
-        else:  # numpy matrix
-            raise TypeError('n-sensor must be an integer value when O is given as a numpy matrix')
+        else:
+            raise TypeError("O must be a pandas DataFrame with a ('sensor', 'time_step') row index and one column "
+                            "per state")
 
         self.n_sensor = len(self.sensor_names_default)  # number of sensors
         self.n_time_step = int(self.pw / self.n_sensor)  # number of time-steps
@@ -981,9 +1005,8 @@ class ObservabilityMatrixImage:
                 def label(p, k):
                     return '$' + self.sensor_names[p] + ',_{' + 'k=' + str(k) + '}$'
 
-            elif len(sensor_names) == 1:
-                self.sensor_names = [sensor_names[0] + '_{' + str(n) + '}$' for n in range(1, self.n_sensor + 1)]
-                self.sensor_names = LatexConverter.convert_to_latex(self.sensor_names, remove_dollar_signs=True)
+            elif len(sensor_names) == 1:   # one name, numbered per sensor as in the row labels
+                self.sensor_names = ['{' + sensor_names[0] + '}_{' + str(p) + '}' for p in range(self.n_sensor)]
 
                 def label(p, k):
                     return '${' + sensor_names[0] + '}_{' + str(p) + ',k=' + str(k) + '}$'
@@ -1001,15 +1024,21 @@ class ObservabilityMatrixImage:
         self.measurement_names = [label(self.sensor_names_default.index(s), k)
                                   for s, k in zip(self.sensors, self.time_steps)]
 
-    def plot(self, vmax_percentile=100, vmin_ratio=0.0, vmax_override=None, cmap='bwr', grid=True, scale=1.0, dpi=150,
-             ax=None):
+    def plot(self, vmax_percentile=None, vmin_ratio=None, vmax_override=None, cmap=None, grid=True, scale=1.0,
+             dpi=150, ax=None):
         """ Plot the observability matrix.
+
+        vmax_percentile, vmin_ratio and cmap default to the values given to the constructor. A value given here
+        replaces the stored one, so it also applies to later calls.
         """
 
         # Plot properties
-        self.vmax_percentile = vmax_percentile
-        self.vmin_ratio = vmin_ratio
-        self.cmap = cmap
+        if vmax_percentile is not None:
+            self.vmax_percentile = vmax_percentile
+        if vmin_ratio is not None:
+            self.vmin_ratio = vmin_ratio
+        if cmap is not None:
+            self.cmap = cmap
 
         if vmax_override is None:
             self.crange = np.percentile(np.abs(self.O), self.vmax_percentile)
@@ -1018,12 +1047,9 @@ class ObservabilityMatrixImage:
 
         # Display O (a copy: clipping must not modify self.O, and .values is read-only under pandas copy-on-write)
         O_disp = self.O.to_numpy(dtype=float, copy=True)
-        # O_disp = np.nan_to_num(np.sign(O_disp) * np.log(np.abs(O_disp)), nan=0.0)
-        for n in range(self.n):
-            for m in range(self.pw):
-                oval = O_disp[m, n]
-                if (np.abs(oval) < (self.vmin_ratio * self.crange)) and (np.abs(oval) > 1e-6):
-                    O_disp[m, n] = self.vmin_ratio * self.crange * np.sign(oval)
+        floor = self.vmin_ratio * self.crange
+        small = (np.abs(O_disp) < floor) & (np.abs(O_disp) > 1e-6)   # raise small entries to the floor, keeping sign
+        O_disp[small] = floor * np.sign(O_disp[small])
 
         # Plot
         if ax is None:
@@ -1078,25 +1104,29 @@ class ObservabilityMatrixImage:
 
 
 def compute_observability(simulator, t_sim, x_sim, u_sim, R,
-                          w=6, eps=1e-4, lam=DEFAULT_LAM, use_jax=False):
+                          w=6, eps=1e-4, lam=DEFAULT_LAM, use_jax=None):
     """Compute sliding-window Fisher observability in one call.
+
+    The same as ``ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, w=w, R=R, lam=lam, eps=eps)``
+    followed by ``.run().min_error_variance()``. Note the default finite-difference step here is
+    ``eps=1e-4``, while ``ObservabilityAnalysis`` defaults to 1e-5: pass ``eps=1e-5`` to reproduce an
+    analysis built without ``eps``.
 
     Parameters
     ----------
     simulator : Simulator or JaxSimulator
-        A configured simulator instance.  Pass a ``JaxSimulator`` when
-        ``use_jax=True``.
+        A configured simulator instance.
     t_sim, x_sim, u_sim : trajectory returned by simulator.simulate(..., return_full_output=True)
     R : dict  — sensor noise covariance, e.g. {'r': 0.1}
     w : int   — sliding window length (time steps)
-    eps : float — finite-difference perturbation size (ignored when use_jax=True)
+    eps : float — finite-difference perturbation size (ignored by the JAX backend)
     lam : float — Chernoff regularization for Fisher inversion, (F + lam*I)^-1.
         1/lam is the ceiling on the minimum error variance, so values near 1/lam
         (1e8 for the default) indicate unobservable states.
-    use_jax : bool — if True, use JAX autodiff (exact Jacobians, faster for many windows).
-        Requires JAX to be installed and ``simulator`` to be a ``JaxSimulator`` whose
-        ``f`` and ``h`` functions are written with ``jax.numpy`` (``jnp``) instead of
-        ``numpy``.  See ``JaxSimulator`` for details.
+    use_jax : bool or None — None (default) picks the backend from the simulator: JAX autodiff
+        (exact Jacobians, faster for many windows) for a ``JaxSimulator``, whose ``f`` and ``h`` are
+        written with ``jax.numpy``, finite differences otherwise. True / False require the matching
+        simulator type.
 
     Returns
     -------
@@ -1106,10 +1136,11 @@ def compute_observability(simulator, t_sim, x_sim, u_sim, R,
     See ``ObservabilityAnalysis`` to keep the observability matrices and query
     other selections of states, sensors and time-steps without recomputing them.
     """
-    from .analysis import ObservabilityAnalysis   # imported here: analysis imports this module
+    from .analysis import ObservabilityAnalysis, _is_jax_simulator   # imported here: analysis imports this module
 
+    if use_jax is None:
+        use_jax = _is_jax_simulator(simulator)
     method_options = {} if use_jax else {'eps': eps}   # eps does not apply to the JAX backend
-    analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='jax' if use_jax else 'empirical',
+    analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='bounds-jax' if use_jax else 'bounds-empirical',
                                      w=w, R=R, lam=lam, **method_options)
-    return analysis.run().min_error_variance(states=simulator.state_names, sensors=simulator.measurement_names,
-                                             time_steps=None if w is None else np.arange(w))
+    return analysis.run().min_error_variance()

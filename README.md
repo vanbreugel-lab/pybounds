@@ -71,8 +71,8 @@ plt.show()
 
 - **Window:** `w` is the sliding-window length in time-steps. Without it, the whole trajectory is analyzed as one window.
 - **Noise:** `R` is the measurement noise variance, per sensor.
-- **Regularization `lam` (λ):** the Fisher information matrix F is inverted as (F + λI)⁻¹. `1e-8` is also the default. 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state.
-- **One-call shortcut:** `pybounds.compute_observability(sim, t, x, u, R={'r': 0.1}, w=6, lam=1e-8)` returns the same result as steps 3 and 4 in a single call, without keeping the analysis.
+- **Regularization `lam` (λ):** the Fisher information matrix F is inverted as (F + λI)⁻¹. `1e-8` is also the default. 1/λ is the ceiling on the minimum error variance: a state whose error variance sits near 1/λ (1e8 by default) is unobservable, not merely poorly estimated. λ is an absolute value, so it should be small compared to the eigenvalues of F, which depend on the sensor noise R and on the units of each state. When states have very different units, give each its own λ: a dict such as `lam={'g': 1e-6, 'd': 1e-10}`, or a 1-D array in the order of the selected states, replaces λI with diag(λᵢ). Selected states that the dict leaves out get the default `1e-8`. Values must be > 0, and `'limit'` is only available as a single value. With a `z_function`, use the transformed state names. A dict passed to a query may only name selected states. A dict given as the `lam` setting may also name other states, and those entries are ignored when a query doesn't select them.
+- **One-call shortcut:** `pybounds.compute_observability(sim, t, x, u, R={'r': 0.1}, w=6, lam=1e-8)` runs steps 3 and 4 in a single call, without keeping the analysis. It picks the backend from the simulator type, like `ObservabilityAnalysis`. Its finite-difference step defaults to `eps=1e-4`, while `ObservabilityAnalysis` defaults to `1e-5`. Pass `eps=1e-5` to get exactly the result of steps 3 and 4.
 
 ### Selecting states, and saving settings and results
 
@@ -96,9 +96,60 @@ oa.save_results('results_g', states=['g'], include_observability_matrices=True)
 ```
 
 - **Dropping a state is conditional:** the states you leave out are treated as known, so the remaining ones usually look more observable than when every state is estimated together.
-- **Changing settings:** `update_settings(...)` changes settings before or after `run()`. Changing anything that affects the observability matrices (e.g. `w`, `eps`, `z_function`) discards the results until you call `run()` again; changing `R` or `lam` does not.
-- **Backends:** `method` picks how the observability matrices are built: `'empirical'` (finite differences) or `'jax'` (autodiff). It is chosen automatically from the simulator type.
-- **Memory:** `run()` keeps every window's observability matrix (8·n_windows·w·p·n bytes). For long windows, `storage='fisher_per_sensor'` keeps each sensor's Fisher information instead, which is smaller when w > (n+1)/2 and still supports selecting states and sensors with a scalar or per-sensor R. With `method='jax'`, `batch_size=...` computes windows in chunks to cap JAX's memory. See [the storage design note](docs/design/observability_storage.md).
+- **Changing settings:** `update_settings(...)` changes settings before or after `run()`. Changing anything that affects the observability matrices (e.g. `w`, `eps`, `z_function`) discards the results until you call `run()` again; changing the query settings `R`, `lam`, `Q` or `alignment` does not.
+- **Methods:** `method` picks how each window's Fisher information is computed. It defaults to `'bounds-jax'` for a `JaxSimulator` and `'bounds-empirical'` otherwise.
+  - `'bounds-empirical'` (finite differences) and `'bounds-jax'` (autodiff) build the empirical observability matrix, with no process noise. The older names `'empirical'` and `'jax'` still work.
+  - `'stochastic-observability-classic'` / `'-jax'` and `'stochastic-constructability-classic'` / `'-jax'` include process noise `Q` (see below).
+- **Memory:** `run()` keeps every window's observability matrix (8·n_windows·w·p·n bytes). For long windows, `storage='fisher_per_sensor'` keeps each sensor's Fisher information instead, which is smaller when w > (n+1)/2 and still supports selecting states and sensors with a scalar or per-sensor R. With `method='bounds-jax'`, `batch_size=...` computes windows in chunks to cap JAX's memory. See [the storage design note](docs/design/observability_storage.md).
+
+### Process noise: stochastic observability and constructability
+
+The `bounds-*` methods assume no process noise, so a longer window always adds information. With process noise `Q`, measurements far from the state of interest say little about it, and the information saturates. The stochastic methods compute this. They follow Boyacioglu & van Breugel, "Duality of Stochastic Observability and Constructability and their Relation to the Fisher Information", *IEEE L-CSS* (2025), [doi:10.1109/LCSYS.2025.3547297](https://doi.org/10.1109/LCSYS.2025.3547297).
+
+```python
+oa = pybounds.ObservabilityAnalysis(sim, t, x, u, method='stochastic-constructability-classic',
+                                    w=20, R={'r': 0.1}, Q={'g': 1e-3, 'd': 1e-6})
+ev = oa.run().min_error_variance()
+ev_more_noise = oa.min_error_variance(Q=1e-2)   # Q, R and lam can change without run()
+```
+
+- **Observability vs constructability:** stochastic *observability* (Eq. 33) is the Fisher information about the state at the **start** of each window, the same state the `bounds-*` methods describe. Stochastic *constructability* (Eq. 30) is about the state at the **end** of each window. Its inverse is the posterior Cramér-Rao bound, the quantity a Kalman filter's error covariance tracks.
+- **`Q`** is the per-step discrete process noise covariance. It can be a scalar, one variance per state (a dict, or a 1-D array in state order), or an (n, n) matrix (an array, or a DataFrame labelled by state name). It must be strictly positive. Give constant parameters a small `Q` rather than zero.
+- **Linearization:** the model is linearized along the trajectory (Φ = expm(A·dt)). `-classic` uses finite differences; `-jax` uses autodiff and needs `f` and `h` written with `jax.numpy`. Because of the linearization, results differ from the `bounds-*` methods by discretization error even as Q → 0. `pybounds.stochastic` also exposes the recursions directly, for linear time-varying systems.
+- **Validation:** [validation/stochastic_duality_fig2.ipynb](validation/stochastic_duality_fig2.ipynb) checks the recursions against the paper's MATLAB code and redraws its Fig. 2.
+- **Sweeping the window size:** the linearization does not depend on `w` or on the coordinate transform. Changing only `w`, `z_function` or `z_state_names` keeps it, and the next `run()` only re-derives the windows. Changing the method or its options linearizes again.
+- **Which states need a small `Q`:** `oa.deterministic_states()` lists the states whose row of Φ is exactly eᵢ at every sample, such as constant parameters and clocks. They have no process noise physically. `oa.model_state_names` gives the names `Q` is keyed by. These are the model's own names, even when a `z_function` renames the states.
+
+#### Using a linearization computed elsewhere
+
+`oa.linearization` returns the linearized trajectory as a frozen `pybounds.Linearization` with fields `Phi` (N, n, n), `C` (N, p, n), `t_sim`, `state_names`, `sensor_names` and `bounded`. Its arrays are read-only and shared with the analysis. It is `None` for the `bounds-*` methods. `ObservabilityAnalysis.from_linearization` wraps such arrays without a simulator. It is the stochastic counterpart of `from_sliding`:
+
+```python
+oa2 = pybounds.ObservabilityAnalysis.from_linearization(
+    Phi, C, method='stochastic-constructability', w=20, t_sim=t, state_names=['g', 'd'], sensor_names=['r'],
+    R={'r': 0.1}, Q={'g': 1e-3, 'd': 1e-6})
+# or round-trip one: from_linearization(**dataclasses.asdict(oa.linearization), method=..., w=...)
+```
+
+- The arrays are kept read-only and are not copied, so analyses built from the same arrays share them.
+- A coordinate transform can be given in either of two ways:
+  - `dxdz_sliding`, with shape (n_windows, n, n), already evaluated at each window's bounded state;
+  - `z_function` plus `x_sim`, which is evaluated exactly as `run()` does it.
+- `z_state_names` names the transformed states.
+- Queries, `fisher_information`, `observability_matrix` and `save_results` behave as they do after `run()`, with bit-identical results. Only the query settings `R`, `lam`, `Q` and `alignment` can change afterwards.
+
+### Where each window's result is placed: `alignment`
+
+Each window gives one value per state, and that value has to be placed somewhere along the trajectory.
+
+- **`alignment='center'` (default):** at the window's center time-step, `w // 2`, for every method. Different methods can then be compared on one time axis.
+- **`alignment='bounded_state'`:** at the state the result actually bounds. That is the window's first time-step for `bounds-*` and stochastic observability, and its last time-step for stochastic constructability.
+
+```python
+ev = oa.min_error_variance(alignment='bounded_state')   # or set it once: update_settings(alignment=...)
+```
+
+Observability and constructability viewed at their bounded states are offset by `w - 1` time-steps. Centered, they usually line up, especially for short windows. The `time` column is where each row is placed, and `time_initial` is the time of the window's first sample.
 
 ## Notebook examples
 

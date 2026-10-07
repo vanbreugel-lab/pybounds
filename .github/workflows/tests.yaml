@@ -48,5 +48,7 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]" "jax[cpu]"
 
-      - name: Run JAX tests
-        run: pytest tests/test_jax_observability.py -v
+      - name: Run all tests with JAX installed
+        # the whole suite, not only test_jax_observability.py: JAX-dependent tests in other files are skipped
+        # in the job above (no JAX), so this is the only place they run. -rs lists any skips in the log.
+        run: pytest tests/ --ignore=tests/test_diagnostic_pdf.py -rs

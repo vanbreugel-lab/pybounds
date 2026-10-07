@@ -42,13 +42,13 @@ def oa(simulator, trajectory):
 def counting_builder(monkeypatch):
     """Replace the empirical builder with one that counts its calls."""
     calls = []
-    original = analysis._BUILDERS['empirical']
+    original = analysis._BUILDERS['bounds-empirical']
 
     def func(*args, **kwargs):
         calls.append(kwargs)
         return original.func(*args, **kwargs)
 
-    monkeypatch.setitem(analysis._BUILDERS, 'empirical', analysis._Builder(func, original.options))
+    monkeypatch.setitem(analysis._BUILDERS, 'bounds-empirical', analysis._Builder(func, original.options))
     return calls
 
 
@@ -134,7 +134,7 @@ class TestEquivalence:
         assert set(kept.window_data) == {'t', 'u', 'y', 'y_plus', 'y_minus'}
 
     def test_attributes(self, oa, seom):
-        assert oa.method == 'empirical'
+        assert oa.method == 'bounds-empirical'
         assert oa.w == WINDOW_SIZE
         assert oa.n_windows == N_WINDOWS
         assert oa.state_names == ['g', 'd']
@@ -178,20 +178,23 @@ class TestSelections:
 class TestMethodsAndOptions:
 
     def test_auto_method_for_simulator(self, simulator, trajectory):
-        assert ObservabilityAnalysis(simulator, *trajectory).method == 'empirical'
+        assert ObservabilityAnalysis(simulator, *trajectory).method == 'bounds-empirical'
 
     def test_auto_method_for_jax_simulator(self, trajectory):
         pytest.importorskip('jax')
         jax_sim = pybounds.JaxSimulator(lambda x, u: np.array([u[0], 0.0 * u[0]]), lambda x, u: x[:1] / x[1:],
                                         dt=0.01, state_names=['g', 'd'], input_names=['u'], measurement_names=['r'])
-        assert ObservabilityAnalysis(jax_sim, *trajectory).method == 'jax'
+        assert ObservabilityAnalysis(jax_sim, *trajectory).method == 'bounds-jax'
 
     def test_unknown_method_raises(self, simulator, trajectory):
-        with pytest.raises(ValueError, match="unknown method 'bogus'; valid methods: \\['empirical', 'jax'\\]"):
+        with pytest.raises(ValueError, match="unknown method 'bogus'; valid methods: \\['bounds-empirical', 'bounds-jax', "
+                                             "'stochastic-observability-classic', 'stochastic-observability-jax', "
+                                             "'stochastic-constructability-classic', 'stochastic-constructability-jax'\\] "
+                                             "\\(aliases: 'empirical' -> 'bounds-empirical', 'jax' -> 'bounds-jax'\\)"):
             ObservabilityAnalysis(simulator, *trajectory, method='bogus')
 
     def test_unsupported_option_raises(self, simulator, trajectory):
-        with pytest.raises(TypeError, match=r"method 'jax' does not accept: \['eps'\]"):
+        with pytest.raises(TypeError, match=r"method 'bounds-jax' does not accept: \['eps'\]"):
             ObservabilityAnalysis(simulator, *trajectory, method='jax', eps=1e-4)
         with pytest.raises(TypeError, match=r"does not accept: \['epsilon'\].*valid options"):
             ObservabilityAnalysis(simulator, *trajectory, epsilon=1e-4)
@@ -206,10 +209,10 @@ class TestMethodsAndOptions:
 
     def test_declared_options_match_native_signatures(self):
         params = inspect.signature(pybounds.SlidingEmpiricalObservabilityMatrix.__init__).parameters
-        assert analysis._BUILDERS['empirical'].options <= set(params)
+        assert analysis._BUILDERS['bounds-empirical'].options <= set(params)
         pytest.importorskip('jax')
         params = inspect.signature(pybounds.JaxSlidingEmpiricalObservabilityMatrix.__init__).parameters
-        assert analysis._BUILDERS['jax'].options <= set(params)
+        assert analysis._BUILDERS['bounds-jax'].options <= set(params)
 
     def test_options_are_forwarded(self, trajectory):
         """parallel_sliding with a thread-safe custom simulator gives the sequential result."""
@@ -401,13 +404,13 @@ class TestAccessors:
         expected = pybounds.SlidingFisherObservability(seom.O_df_sliding, time=seom.t_sim, R={'r': 0.1},
                                                        lam=1e-8).get_minimum_error_variance()
         pd.testing.assert_frame_equal(oa.min_error_variance(), expected)
-        with pytest.raises(ValueError, match='only R and lam can be changed'):
+        with pytest.raises(ValueError, match=r'only the query settings \(R, lam, Q, alignment\) can be changed'):
             oa.update_settings(w=3)
         oa.update_settings(lam=1e-6)
 
     def test_repr(self, simulator, trajectory):
         oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE)
-        assert repr(oa) == "ObservabilityAnalysis(method='empirical', w=6, not computed)"
+        assert repr(oa) == "ObservabilityAnalysis(method='bounds-empirical', w=6, not computed)"
 
 
 def test_works_without_jax():
@@ -417,7 +420,7 @@ def test_works_without_jax():
             "                         state_names=['g','d'], input_names=['u'], measurement_names=['r'])\n"
             "t, x, u, _ = sim.simulate(x0={'g': 2., 'd': 3.}, u={'u': 0.1*np.ones(10)}, return_full_output=True)\n"
             "oa = pybounds.ObservabilityAnalysis(sim, t, x, u, w=4, R=0.1)\n"
-            "assert oa.method == 'empirical'\n"
+            "assert oa.method == 'bounds-empirical'\n"
             "oa.run().min_error_variance()\n"
             "try:\n"
             "    pybounds.ObservabilityAnalysis(sim, t, x, u, w=4, method='jax').run()\n"
@@ -430,7 +433,16 @@ def test_works_without_jax():
             "except ImportError as e:\n"
             "    assert 'pip install jax' in str(e)\n"
             "else:\n"
-            "    raise AssertionError('expected ImportError from compute_observability')\n")
+            "    raise AssertionError('expected ImportError from compute_observability')\n"
+            "oa = pybounds.ObservabilityAnalysis(sim, t, x, u, w=4, R=0.1, Q=1e-4,\n"
+            "                                    method='stochastic-constructability-classic')\n"
+            "oa.run().min_error_variance()\n"
+            "try:\n"
+            "    pybounds.ObservabilityAnalysis(sim, t, x, u, w=4, method='stochastic-observability-jax').run()\n"
+            "except ImportError as e:\n"
+            "    assert 'pip install jax' in str(e)\n"
+            "else:\n"
+            "    raise AssertionError('expected ImportError from a stochastic jax method')\n")
     out = subprocess.run([sys.executable, '-W', 'ignore', '-c', code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
 
@@ -473,9 +485,10 @@ class TestSettingsYaml:
         _, _, path = self._roundtrip(simulator, trajectory, tmp_path, w=WINDOW_SIZE, eps=1e-4, R={'r': 0.1})
         document = yaml.safe_load(Path(path).read_text())
         assert set(document) == {'pybounds_version', 'created', 'settings', 'references', 'simulator'}
-        assert document['settings'] == {'method': 'empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
+        assert document['settings'] == {'method': 'bounds-empirical', 'w': WINDOW_SIZE, 'z_state_names': None,
                                         'storage': 'observability', 'fisher_sensors': None, 'keep_source': False,
-                                        'R': {'r': 0.1}, 'lam': 1e-8, 'eps': 1e-4}
+                                        'R': {'r': 0.1}, 'lam': 1e-8, 'Q': None, 'alignment': 'center',
+                                        'eps': 1e-4}
         assert document['simulator']['state_names'] == ['g', 'd']
         assert document['simulator']['dt'] == 0.01
 
@@ -554,7 +567,8 @@ class TestSaveResults:
                                       check_index_type=False)
         sidecar = yaml.safe_load(Path(files['sidecar']).read_text())
         assert sidecar['selection'] == {'states': ['d'], 'sensors': ['r'], 'time_steps': [0, 1, 2],
-                                        'R': {'r': 0.1}, 'lam': 1e-6, 'force_R_scalar': False}
+                                        'R': {'r': 0.1}, 'lam': 1e-6, 'Q': None, 'alignment': 'center',
+                                        'force_R_scalar': False}
         assert sidecar['all_states'] == ['g', 'd']
         assert sidecar['all_sensors'] == ['r']
         assert sidecar['all_time_steps'] == list(range(WINDOW_SIZE))

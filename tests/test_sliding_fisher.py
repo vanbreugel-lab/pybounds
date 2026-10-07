@@ -87,6 +87,30 @@ class TestSlidingFisherTimeAlignment:
         assert np.isclose(first['time'], (w // 2) * dt)
 
 
+class TestComputeObservability:
+    """Regression for #17: compute_observability runs the README's analysis steps (with its own eps default)."""
+
+    def test_matches_analysis_steps(self, simulator, simulation_output):
+        t, x, u, _ = simulation_output
+        expected = pybounds.ObservabilityAnalysis(simulator, t, x, u, w=WINDOW_SIZE, R={'r': 0.1}, lam=1e-8)
+        expected = expected.run().min_error_variance()
+        pd.testing.assert_frame_equal(
+            pybounds.compute_observability(simulator, t, x, u, R={'r': 0.1}, w=WINDOW_SIZE, lam=1e-8, eps=1e-5),
+            expected, check_exact=True)
+        # its own default step is 1e-4, documented in its docstring and the README
+        default = pybounds.compute_observability(simulator, t, x, u, R={'r': 0.1}, w=WINDOW_SIZE, lam=1e-8)
+        pd.testing.assert_frame_equal(default, pybounds.ObservabilityAnalysis(
+            simulator, t, x, u, w=WINDOW_SIZE, R={'r': 0.1}, lam=1e-8, eps=1e-4).run().min_error_variance(),
+            check_exact=True)
+
+    def test_use_jax_inferred_for_simulator(self, simulator, simulation_output):
+        t, x, u, _ = simulation_output
+        pd.testing.assert_frame_equal(
+            pybounds.compute_observability(simulator, t, x, u, R={'r': 0.1}, w=WINDOW_SIZE),
+            pybounds.compute_observability(simulator, t, x, u, R={'r': 0.1}, w=WINDOW_SIZE, use_jax=False),
+            check_exact=True)
+
+
 class TestSlidingFisherSingleWindow:
 
     def test_compute_observability_single_window_has_time(self, simulator):

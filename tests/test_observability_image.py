@@ -141,3 +141,60 @@ class TestObservabilityMatrixImageRowLabels:
             ['$sa,_{k=0}$', '$sb,_{k=0}$', '$sa,_{k=1}$', '$sb,_{k=1}$', '$sa,_{k=2}$', '$sb,_{k=2}$']
         assert pybounds.ObservabilityMatrixImage(O, sensor_names=['s']).measurement_names == \
             ['${s}_{0,k=0}$', '${s}_{1,k=0}$', '${s}_{0,k=1}$', '${s}_{1,k=1}$', '${s}_{0,k=2}$', '${s}_{1,k=2}$']
+
+
+class TestObservabilityMatrixImageSettings:
+    """Regression for #16: the constructor's cmap / vmin_ratio / vmax_percentile were overwritten by plot()."""
+
+    @staticmethod
+    def _drawn(OI):
+        return np.asarray(OI.ax.images[0].get_array())
+
+    def test_constructor_values_reach_plot(self, seom):
+        OI = pybounds.ObservabilityMatrixImage(seom.O_df_sliding[0], cmap='viridis', vmin_ratio=0.5,
+                                               vmax_percentile=90)
+        OI.plot()
+        assert OI.ax.images[0].get_cmap().name == 'viridis'
+        O = np.abs(seom.O_df_sliding[0].to_numpy())
+        crange = np.percentile(O, 90)
+        assert OI.crange == crange
+        drawn = np.abs(self._drawn(OI))
+        assert drawn[O > 1e-6].min() >= 0.5 * crange * (1 - 1e-12)   # small entries raised to the floor
+        plt.close(OI.fig)
+
+    def test_plot_arguments_override_and_persist(self, seom):
+        OI = pybounds.ObservabilityMatrixImage(seom.O_df_sliding[0], cmap='viridis')
+        OI.plot(cmap='magma')
+        assert OI.ax.images[0].get_cmap().name == 'magma'
+        plt.close(OI.fig)
+        OI.plot()
+        assert OI.ax.images[0].get_cmap().name == 'magma'   # a value given to plot() replaces the stored one
+        plt.close(OI.fig)
+
+    def test_default_plot_is_unchanged(self, seom):
+        """Defaults: bwr, no clipping (vmin_ratio 0), color range the largest |O|, as before."""
+        O = seom.O_df_sliding[0]
+        OI = pybounds.ObservabilityMatrixImage(O)
+        OI.plot()
+        assert OI.ax.images[0].get_cmap().name == 'bwr' and OI.vmin_ratio == 0.0
+        assert OI.crange == np.abs(O.to_numpy()).max()
+        np.testing.assert_array_equal(self._drawn(OI), O.to_numpy())
+        plt.close(OI.fig)
+
+    def test_clipping_keeps_sign_and_skips_tiny_values(self):
+        import pandas as pd
+        index = pd.MultiIndex.from_tuples([('r', 0), ('r', 1), ('r', 2)], names=['sensor', 'time_step'])
+        O = pd.DataFrame([[10.0, -0.5], [1e-9, 0.2], [0.0, -10.0]], index=index, columns=['g', 'd'])
+        OI = pybounds.ObservabilityMatrixImage(O, vmin_ratio=0.1)
+        OI.plot()
+        drawn = self._drawn(OI)
+        np.testing.assert_array_equal(drawn[:, 0], [10.0, 1e-9, 0.0])   # above the floor, or below 1e-6: untouched
+        np.testing.assert_array_equal(drawn[:, 1], [-1.0, 1.0, -10.0])  # raised to 0.1 * 10, sign kept
+        plt.close(OI.fig)
+
+    def test_messages_and_names(self, seom):
+        with pytest.raises(TypeError, match="O must be a pandas DataFrame with a \\('sensor', 'time_step'\\)"):
+            pybounds.ObservabilityMatrixImage(seom.O_sliding[0])
+        OI = pybounds.ObservabilityMatrixImage(_two_sensor_image_O(sensor_major=False), sensor_names=['s'])
+        assert OI.sensor_names == ['{s}_{0}', '{s}_{1}']   # numbered like the row labels, no stray '$'
+        assert OI.measurement_names[:2] == ['${s}_{0,k=0}$', '${s}_{1,k=0}$']

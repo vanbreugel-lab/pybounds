@@ -116,7 +116,7 @@ With `storage='observability'`, each query used to build a `FisherObservability`
 ## JAX `batch_size`
 Without batching, the JAX builder computes every window in one batched call. For dynamics that XLA can't fuse, the peak is about 2.2× O: the `jacfwd` output plus its transposed copy. Linear dynamics peak lower (about 1.2× O).
 
-`batch_size` (an option of `JaxSlidingEmpiricalObservabilityMatrix`, and of `ObservabilityAnalysis` with `method='jax'`) computes at most that many windows per call:
+`batch_size` (an option of `JaxSlidingEmpiricalObservabilityMatrix`, and of `ObservabilityAnalysis` with `method='bounds-jax'`) computes at most that many windows per call:
 - **The analysis streams the chunks** straight into its storage.
 - **Every chunk has the same size:** the last chunk is padded by repeating its last window, and the padding is dropped, so the batched functions compile only once.
 
@@ -173,7 +173,7 @@ Without batching, the JAX builder computes every window in one batched call. For
 - **Added:**
   - `storage`, `fisher_sensors`, `keep_source` settings (also saved in YAML);
   - internal streaming hooks on the builder classes (`_prepared`, `_iter_windows`, `_compute`), with their public behavior unchanged;
-  - `batch_size` for `JaxSlidingEmpiricalObservabilityMatrix` and the `'jax'` method;
+  - `batch_size` for `JaxSlidingEmpiricalObservabilityMatrix` and the `'bounds-jax'` method;
   - `fisher_information()`;
   - `SlidingO(O=..., index=..., state_names=...)`;
   - `SlidingFisherObservability(keep_windows=...)`.

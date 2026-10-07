@@ -568,7 +568,8 @@ def _require_jax_simulator(simulator, cls_name):
     """Raise a clear error when a non-JAX simulator is passed to a JAX-backend class."""
     if not isinstance(simulator, JaxSimulator):
         raise TypeError(f'{cls_name} requires a JaxSimulator, got {type(simulator).__name__}; '
-                        f'use {cls_name[3:]} instead (or compute_observability(..., use_jax=False)).')
+                        f'use {cls_name[3:]} instead (compute_observability: use_jax=False, or leave use_jax unset '
+                        f'to pick the backend from the simulator).')
 
 
 def _nonfinite_windows(jac, y):

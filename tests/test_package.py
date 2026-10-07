@@ -31,3 +31,18 @@ def test_star_import_with_jax():
     pytest.importorskip('jax')
     out = _run("from pybounds import *\nassert 'JaxSimulator' in dir()\n")
     assert out.returncode == 0, out.stderr
+
+
+def test_public_api_surface():
+    """#19: the stochastic functions live only in pybounds.stochastic, its helpers are private, and SlidingO
+    (part of the from_sliding contract) is exported."""
+    from pybounds import analysis, stochastic
+    assert 'SlidingO' in pybounds.__all__ and pybounds.SlidingO is analysis.SlidingO
+    assert 'Linearization' in pybounds.__all__ and pybounds.Linearization is analysis.Linearization
+    assert 'stochastic' in pybounds.__all__ and pybounds.stochastic is stochastic
+    for name in ('stochastic_observability_gramian', 'stochastic_constructability_gramian',
+                 'deterministic_observability_gramian', 'process_covariance'):
+        assert name not in pybounds.__all__ and not hasattr(pybounds, name), name
+        assert callable(getattr(stochastic, name)), name
+    for name in ('fd_jacobian', 'q_spread_warning'):
+        assert not hasattr(stochastic, name), name
