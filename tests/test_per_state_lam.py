@@ -115,6 +115,15 @@ class TestRules:
         finally:
             oa.update_settings(lam=DEFAULT_LAM)
 
+    @pytest.mark.parametrize('kind', KINDS)
+    def test_lam_none_is_the_default(self, simulator, trajectory, kind):
+        """Regression: lam=None raised TypeError outside FisherObservability (which treats it as DEFAULT_LAM)."""
+        oa = _make(simulator, trajectory, kind)
+        expected = oa.min_error_variance(lam=DEFAULT_LAM)
+        pd.testing.assert_frame_equal(oa.min_error_variance(lam=None), expected, check_exact=True)
+        oa.update_settings(lam=None)
+        pd.testing.assert_frame_equal(oa.min_error_variance(), expected, check_exact=True)
+
     def test_limit_stays_scalar(self, oa):
         ev = oa.min_error_variance(lam='limit')
         expected = oa.fisher(lam='limit').get_minimum_error_variance()

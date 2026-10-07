@@ -315,6 +315,43 @@ class TestQueries:
         oa = ObservabilityAnalysis(simulator, *trajectory, w=WINDOW_SIZE, eps=EPS, R=0.1, Q=1e-4).run()
         pd.testing.assert_frame_equal(oa.min_error_variance(), bounds.min_error_variance())
 
+    def test_Q_per_state_vector_and_series(self, obs):
+        """Regression: a 1-D Q fell through to float() and raised an unrelated TypeError."""
+        expected = obs.fisher_information(Q={'g': 1e-4, 'd': 1e-6})
+        np.testing.assert_array_equal(obs.fisher_information(Q=np.array([1e-4, 1e-6])), expected)
+        np.testing.assert_array_equal(obs.fisher_information(Q=[1e-4, 1e-6]), expected)
+        np.testing.assert_array_equal(obs.fisher_information(Q=pd.Series({'d': 1e-6, 'g': 1e-4})), expected)
+        with pytest.raises(ValueError, match='one variance per model state'):
+            obs.min_error_variance(Q=np.array([1e-4, 1e-6, 1e-6]))
+        with pytest.raises(ValueError, match='strictly positive'):
+            obs.min_error_variance(Q=np.array([1e-4, 0.0]))
+        with pytest.raises(ValueError, match=r'Q must be a scalar, a dict or 1-D array'):
+            obs.min_error_variance(Q='large')
+
+    @pytest.mark.parametrize('Q', [pd.DataFrame(np.diag([1e-4, 1e-6]), index=['g', 'd'], columns=['g', 'd']),
+                                   pd.DataFrame([[1e-6, 0.0], [0.0, 1e-4]], index=['d', 'g'], columns=['d', 'g']),
+                                   np.diag([1e-4, 1e-6]), np.array([1e-4, 1e-6]), {'g': 1e-4, 'd': 1e-6}, 1e-4])
+    def test_Q_yaml_roundtrip(self, simulator, trajectory, obs, tmp_path, Q):
+        """Regression: a DataFrame Q was written with R's (sensor, time_step) labels and could not be loaded."""
+        import yaml
+        oa = ObservabilityAnalysis(simulator, *trajectory, method='stochastic-observability-classic',
+                                   w=WINDOW_SIZE, R=0.1, Q=Q)
+        loaded = ObservabilityAnalysis(simulator, *trajectory).load_settings(oa.save_settings(tmp_path / 's.yaml'))
+        loaded_Q = loaded.settings['Q']
+        if isinstance(Q, pd.DataFrame):
+            pd.testing.assert_frame_equal(loaded_Q, Q)
+        else:
+            np.testing.assert_array_equal(np.asarray(loaded_Q if not isinstance(Q, dict) else
+                                                     [loaded_Q[k] for k in Q]), np.asarray(
+                                                         Q if not isinstance(Q, dict) else list(Q.values())))
+        np.testing.assert_array_equal(loaded.run().fisher_information(), obs.fisher_information(Q=Q))
+        # the save_results sidecar loads too
+        files = obs.save_results(tmp_path / 'out', Q=Q)
+        assert ObservabilityAnalysis(simulator, *trajectory).load_settings(files['sidecar']).method == obs.method
+        sidecar_Q = yaml.safe_load(open(files['sidecar']))['selection']['Q']
+        if isinstance(Q, pd.DataFrame):
+            assert sidecar_Q['_names'] == list(Q.index)
+
     def test_R_errors(self, obs):
         with pytest.raises(ValueError, match='a matrix R is not supported'):
             obs.min_error_variance(R=np.eye(WINDOW_SIZE))

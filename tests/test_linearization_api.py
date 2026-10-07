@@ -282,3 +282,69 @@ class TestKeepLinearization:
         assert oa._lin is None
         oa.run()
         assert oa.linearization is None and oa.method == 'bounds-empirical'
+
+
+class TestRegressions:
+
+    def test_settings_saved_from_linearization_load_into_a_simulator_analysis(self, simulator, trajectory, tmp_path):
+        """Regression: from_linearization saved its suffix-less method name, which load_settings rejected."""
+        lin = _run(simulator, trajectory, 'constructability').linearization
+        wrapped = ObservabilityAnalysis.from_linearization(**_fields(lin), method='stochastic-constructability',
+                                                           w=WINDOW_SIZE, R=0.1, Q=1e-4)
+        path = wrapped.save_settings(tmp_path / 's.yaml')
+        assert ObservabilityAnalysis(simulator, *trajectory).load_settings(path).method == \
+            'stochastic-constructability-classic'
+        keep = ObservabilityAnalysis(simulator, *trajectory, method='stochastic-constructability-jax')
+        assert keep.load_settings(path).method == 'stochastic-constructability-jax'   # same kind: backend kept
+        loaded = ObservabilityAnalysis(simulator, *trajectory).load_settings(path).run()
+        pd.testing.assert_frame_equal(loaded.min_error_variance(), wrapped.min_error_variance(), check_exact=True)
+        files = wrapped.save_results(tmp_path / 'out')
+        assert ObservabilityAnalysis(simulator, *trajectory).load_settings(files['sidecar']).method == \
+            'stochastic-constructability-classic'
+
+    def test_bare_method_names(self, simulator, trajectory):
+        oa = ObservabilityAnalysis(simulator, *trajectory, method='stochastic-observability')
+        assert oa.method == 'stochastic-observability-classic'
+        oa.update_settings(method='stochastic-constructability')
+        assert oa.method == 'stochastic-constructability-classic'
+        pytest.importorskip('jax')
+        jax_sim = pybounds.JaxSimulator(lambda x, u: [u[0], 0.0 * u[0]], lambda x, u: [x[0] / x[1]], dt=0.01,
+                                        state_names=['g', 'd'], input_names=['u'], measurement_names=['r'])
+        assert ObservabilityAnalysis(jax_sim, *trajectory, method='stochastic-observability').method == \
+            'stochastic-observability-jax'
+
+    def test_linearization_compares_by_identity(self, simulator, trajectory):
+        """Regression: the dataclass compared array fields element-wise, so == and hash() raised."""
+        lin = _run(simulator, trajectory, 'observability').linearization
+        copy = dataclasses.replace(lin, Phi=lin.Phi.copy())
+        assert lin == lin and lin != copy and lin != dataclasses.replace(lin)
+        assert {lin: 1}[lin] == 1 and hash(lin) != hash(copy)
+
+    def test_custom_simulator_without_state_names(self, trajectory):
+        """Regression: with no simulator state names, a dict x_sim and a z_function failed: the transform ordered
+        x_sim by the default names x_0, x_1 instead of the dict's keys."""
+        class Custom:
+            dt = 0.01
+            measurement_names = ['r']
+
+            @staticmethod
+            def f(x, u):
+                return [u[0], 0 * u[0]]
+
+            @staticmethod
+            def h(x, u):
+                return [x[0] / x[1]]
+
+        oa = ObservabilityAnalysis(Custom(), *trajectory, method='stochastic-observability-classic', w=WINDOW_SIZE,
+                                   R=0.1, Q=1e-4, z_function=z_optic_flow, z_state_names=['of', 'd']).run()
+        assert oa.model_state_names == ['g', 'd'] and oa.state_names == ['of', 'd']
+        g, d = trajectory[1]['g'][3], trajectory[1]['d'][3]
+        np.testing.assert_allclose(oa.dxdz_sliding[3], np.linalg.inv([[1 / d, -g / d ** 2], [0.0, 1.0]]), rtol=1e-12)
+        # from_linearization names the states after a dict x_sim the same way
+        wrapped = ObservabilityAnalysis.from_linearization(oa.linearization.Phi, oa.linearization.C,
+                                                           method='stochastic-observability', w=WINDOW_SIZE,
+                                                           t_sim=trajectory[0], z_function=z_optic_flow,
+                                                           x_sim=trajectory[1],
+                                                           z_state_names=['of', 'd'], R=0.1, Q=1e-4)
+        assert wrapped.model_state_names == ['g', 'd']
+        pd.testing.assert_frame_equal(wrapped.min_error_variance(), oa.min_error_variance(), check_exact=True)

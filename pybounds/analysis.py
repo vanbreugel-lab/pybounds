@@ -90,7 +90,7 @@ class _WindowStream:
     source: object = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)   # compared and hashed by identity: element-wise array equality has no truth value
 class Linearization:
     """A trajectory linearized for the stochastic methods: Phi_k = expm(A_k dt) and C_k at every sample.
 
@@ -317,6 +317,8 @@ def _make_stochastic_builder(bounded, backend):
         N = t_sim.shape[0]
         state_names = getattr(simulator, 'state_names', None)
         if isinstance(x_sim, dict):
+            if state_names is None:   # the dict's keys name the states, in its order
+                state_names = list(x_sim)
             x_sim = np.vstack(_ordered_values(x_sim, state_names, 'x_sim')).T
         x_sim = np.asarray(x_sim, dtype=float).reshape(N, -1)
         if isinstance(u_sim, dict):
@@ -389,8 +391,18 @@ def _read_only(x):
     return view
 
 
-def _canonical_method(method):
-    return _METHOD_ALIASES.get(method, method) if isinstance(method, str) else method
+def _canonical_method(method, simulator=None, current=None):
+    """The registered name of a method: aliases resolved, and a stochastic method given without its backend
+    ('stochastic-observability', as from_linearization saves it) completed with the current method's backend when
+    it is the same kind, else with the one the simulator suggests ('-jax' for a JaxSimulator, '-classic')."""
+    if not isinstance(method, str):
+        return method
+    method = _METHOD_ALIASES.get(method, method)
+    if method in _STOCHASTIC_KINDS:
+        if isinstance(current, str) and current in _BUILDERS and current.startswith(method + '-'):
+            return current
+        return method + ('-jax' if _is_jax_simulator(simulator) else '-classic')
+    return method
 
 
 def _is_stochastic(method):
@@ -521,6 +533,27 @@ def _R_to_yaml(R):
     return float(R.squeeze())
 
 
+def _Q_to_yaml(Q):
+    """Q as plain data. A labelled matrix keeps its state names (R's matrix form is labelled by (sensor, time_step)
+    instead, see _R_to_yaml)."""
+    if isinstance(Q, pd.DataFrame):
+        return {'_matrix': _to_plain(Q.values), '_names': [_to_plain(name) for name in Q.index]}
+    if isinstance(Q, pd.Series):
+        return {str(k): float(v) for k, v in Q.items()}
+    if isinstance(Q, (np.ndarray, list, tuple)) and np.ndim(Q) >= 1:
+        Q = np.asarray(Q, dtype=float)
+        return {'_matrix': _to_plain(Q), '_names': None} if Q.ndim == 2 else _to_plain(Q)
+    return _R_to_yaml(Q)   # None, a scalar or a dict
+
+
+def _Q_from_yaml(Q):
+    if isinstance(Q, dict) and '_matrix' in Q:
+        matrix = np.asarray(Q['_matrix'], dtype=float)
+        names = Q.get('_names')
+        return matrix if names is None else pd.DataFrame(matrix, index=names, columns=names)
+    return Q
+
+
 def _R_from_yaml(R):
     if isinstance(R, dict) and '_matrix' in R:
         matrix = np.asarray(R['_matrix'], dtype=float)
@@ -555,6 +588,8 @@ def _coerce_numbers(settings):
         value = settings.get(key)
         if isinstance(value, dict) and '_matrix' not in value:
             settings[key] = {k: _number(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            settings[key] = [_number(v) for v in value]
         elif isinstance(value, str):
             settings[key] = _number(value)
     return settings
@@ -600,6 +635,9 @@ class ObservabilityAnalysis:
         'stochastic-constructability-classic' / 'stochastic-constructability-jax': the stochastic constructability
         Gramian (Eq. 30), the Fisher information about the window's final state: its inverse is the posterior
         Cramer-Rao bound, which a Kalman filter's error covariance tracks.
+        'stochastic-observability' / 'stochastic-constructability' without a backend (as from_linearization saves
+        them) pick one: the current method's, when it is the same kind, else '-jax' for a JaxSimulator, '-classic'
+        otherwise.
         The stochastic methods keep the linearization, not O: queries run the recursion, so Q, R and lam can be
         changed without run(). See pybounds.stochastic
     :param int w: window size in time-steps; None uses the full trajectory (one window)
@@ -618,8 +656,9 @@ class ObservabilityAnalysis:
         be > 0. As a query argument, a dict may only name selected states; as this setting it may also name other
         states, which are ignored for queries that do not select them
     :param Q: default process noise covariance for queries, stochastic methods only (ignored otherwise): the
-        per-step discrete covariance, used at every step. A scalar (q * I), a dict of state name -> variance
-        covering every state, or an (n, n) matrix. Keyed by the model's own state names even when z_function is
+        per-step discrete covariance, used at every step. A scalar (q * I); one variance per state as a dict (or
+        pd.Series) covering every state or a 1-D array in state order; or an (n, n) matrix (a DataFrame labelled by
+        state name, or an array in state order). Keyed by the model's own state names even when z_function is
         set, because the recursion runs in the model's coordinates. Must be strictly positive definite
     :param str alignment: where each window's minimum error variance is placed along the trajectory.
         'center' (default): at the window's center time-step, w // 2, for every method, so all methods share
@@ -670,7 +709,7 @@ class ObservabilityAnalysis:
         self._u_sim_in = u_sim
         self._external = False
 
-        method = _default_method(simulator) if method is None else _canonical_method(method)
+        method = _default_method(simulator) if method is None else _canonical_method(method, simulator)
 
         self._settings = {'method': method, 'w': w, 'aux_list': aux_list, 'z_function': z_function,
                           'z_state_names': z_state_names, 'storage': storage, 'fisher_sensors': fisher_sensors,
@@ -733,7 +772,8 @@ class ObservabilityAnalysis:
             '-classic' or '-jax', may be included)
         :param int w: window size in time-steps; None uses the whole trajectory (one window)
         :param t_sim: (N,) time of every sample (None: time in samples)
-        :param list state_names: the model's own state names (default x_0, x_1, ...); Q is keyed by these
+        :param list state_names: the model's own state names (default: the keys of a dict x_sim, else x_0, x_1, ...);
+            Q is keyed by these
         :param list sensor_names: the measurement names (default y_0, y_1, ...)
         :param str bounded: optional, 'initial' or 'final'; must agree with method if given (it lets the fields of
             ``analysis.linearization`` be passed straight back in)
@@ -772,6 +812,8 @@ class ObservabilityAnalysis:
                           'keep_source': False, 'R': R, 'lam': lam, 'Q': Q, 'alignment': alignment}
         self._method_options = {}
         self._discard_results()
+        if state_names is None and isinstance(x_sim, dict):   # the dict's keys name the states, in its order
+            state_names = list(x_sim)
         self._store_linearization(Linearization(Phi=Phi, C=C, t_sim=t_sim, state_names=state_names,
                                                 sensor_names=sensor_names, bounded=_bounded_of(method)),
                                   dxdz_sliding=dxdz_sliding)
@@ -798,7 +840,7 @@ class ObservabilityAnalysis:
         if not settings:
             return self
         if 'method' in settings:
-            settings['method'] = _canonical_method(settings['method'])
+            settings['method'] = _canonical_method(settings['method'], self.simulator, self._settings['method'])
         new_settings = dict(self._settings)
         new_options = dict(self._method_options)
         for key, value in settings.items():
@@ -851,7 +893,7 @@ class ObservabilityAnalysis:
                            'fisher_sensors': self._settings['fisher_sensors'],
                            'keep_source': self._settings['keep_source'],
                            'R': _R_to_yaml(self._settings['R']), 'lam': self._settings['lam'],
-                           'Q': _R_to_yaml(self._settings['Q']), 'alignment': self._settings['alignment']}
+                           'Q': _Q_to_yaml(self._settings['Q']), 'alignment': self._settings['alignment']}
         references = {k: _reference(self._settings[k]) for k in self._REFERENCE_SETTINGS}
         for key, value in self._method_options.items():
             if callable(value) or not _is_plain(value):
@@ -900,9 +942,10 @@ class ObservabilityAnalysis:
             document = document['analysis']   # a save_results sidecar
         settings = _coerce_numbers(dict(document.get('settings') or {}))
         references = document.get('references') or {}
-        for key in ('R', 'Q'):
-            if key in settings:
-                settings[key] = _R_from_yaml(settings[key])
+        if 'R' in settings:
+            settings['R'] = _R_from_yaml(settings['R'])
+        if 'Q' in settings:
+            settings['Q'] = _Q_from_yaml(settings['Q'])
 
         if self._external:
             ignored = sorted(set(settings) - set(self._QUERY_SETTINGS))
@@ -1363,7 +1406,9 @@ class ObservabilityAnalysis:
         query may name only selected states, the lam setting may also name other (existing) states."""
         from_setting = lam is _UNSET
         lam = self._settings['lam'] if from_setting else lam
-        if not isinstance(lam, dict) and (isinstance(lam, str) or lam is None or np.ndim(lam) == 0):
+        if lam is None:   # as FisherObservability treats it
+            return DEFAULT_LAM
+        if not isinstance(lam, dict) and (isinstance(lam, str) or np.ndim(lam) == 0):
             return lam
         names = list(states) if states is not None else list(self._state_names)
         if isinstance(lam, dict):
@@ -1599,8 +1644,15 @@ class ObservabilityAnalysis:
                 raise ValueError(f'Q must give a variance for every state of the model {names}; '
                                  f'missing {missing}, unknown {unknown}')
             return _stochastic.process_covariance(Q[names[0]], names, overrides=Q)
+        if isinstance(Q, pd.Series):
+            return self._process_noise(Q.to_dict())
         if isinstance(Q, pd.DataFrame):
             Q = Q.loc[names, names].to_numpy(dtype=float)
+        if np.ndim(Q) == 1:
+            values = np.asarray(Q, dtype=float)
+            if len(values) != n:
+                raise ValueError(f'a 1-D Q must give one variance per model state ({n}: {names}), got {len(values)}')
+            return _stochastic.process_covariance(values[0], names, overrides=dict(zip(names, values)))
         if np.ndim(Q) == 2:
             Q = np.asarray(Q, dtype=float)
             if Q.shape != (n, n):
@@ -1615,7 +1667,12 @@ class ObservabilityAnalysis:
                 warnings.warn(_stochastic.q_spread_warning(np.linalg.eigvalsh(Q), [''] * n), RuntimeWarning,
                               stacklevel=4)
             return Q
-        return _stochastic.process_covariance(float(np.squeeze(Q)), names)
+        try:
+            q = float(Q)
+        except (TypeError, ValueError):
+            raise ValueError(f'Q must be a scalar, a dict or 1-D array of one variance per state, or an (n, n) matrix; '
+                             f'got {Q!r}') from None
+        return _stochastic.process_covariance(q, names)
 
     def _measurement_information(self, R, sensors, force_R_scalar):
         """R^-1 of one time-step for the selected sensors, from a scalar, per-sensor dict or None R."""
@@ -1787,7 +1844,7 @@ class ObservabilityAnalysis:
             'selection': {'states': states_l or self._state_names,
                           'sensors': sensors_l or self._sensor_names,
                           'time_steps': time_steps_l or self._time_steps,
-                          'R': _R_to_yaml(R_r), 'lam': lam_r, 'Q': _R_to_yaml(Q_r), 'alignment': alignment_r,
+                          'R': _R_to_yaml(R_r), 'lam': lam_r, 'Q': _Q_to_yaml(Q_r), 'alignment': alignment_r,
                           'force_R_scalar': bool(force_R_scalar)},
             'all_states': self._state_names,
             'all_sensors': self._sensor_names,
