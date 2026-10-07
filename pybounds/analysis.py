@@ -15,6 +15,7 @@ their builders return a ``_Linearization`` (Phi, C along the trajectory), and ev
 query runs the stochastic observability or constructability recursion on it.
 """
 
+import contextlib
 import sys
 import warnings
 from collections.abc import Sequence
@@ -31,6 +32,7 @@ from .observability import (DEFAULT_LAM, SlidingEmpiricalObservabilityMatrix, Sl
                             FisherObservability, ObservabilityMatrixImage, _ordered_values, _transform_O_df,
                             _z_jacobian_function, _fisher_inverse, _align_error_variance)
 from . import stochastic as _stochastic
+from .simulator import Simulator
 
 
 class _Unset:
@@ -299,19 +301,60 @@ def _model_functions(simulator, backend):
     f, h = getattr(simulator, 'f', None), getattr(simulator, 'h', None)
     if not (callable(f) and callable(h)):
         raise TypeError(f'the stochastic methods linearize the model, so the simulator needs callable f(x, u) and '
-                        f'h(x, u) attributes (or f_jax / h_jax); {type(simulator).__name__} has none')
+                        f'h(x, u) attributes (or f_jax / h_jax); {type(simulator).__name__} has none. A simulator '
+                        f'that only returns measurements cannot be used: process noise enters the state, so the '
+                        f'state transition is needed')
     if backend == 'jax':   # pybounds.Simulator wraps h to return floats, which JAX cannot trace
         h = getattr(h, '__wrapped__', h)
     return f, h
 
 
+LINEARIZATIONS = ('flow', 'expm')
+
+
+def _simulator_kind(simulator):
+    """'casadi' (pybounds Simulator), 'jax' (JaxSimulator) or 'custom'."""
+    if _is_jax_simulator(simulator):
+        return 'jax'
+    return 'casadi' if isinstance(simulator, Simulator) else 'custom'
+
+
+def _is_discrete(simulator, kind):
+    if kind == 'casadi':
+        return simulator.model.model_type == 'discrete'
+    return bool(getattr(simulator, 'discrete', False))
+
+
+def _resolve_linearization(linearization, kind, backend, discrete):
+    """The linearization a stochastic builder uses: 'flow' (the Jacobian of the simulator's own integrator step,
+    or of a discrete update map) whenever the backend can differentiate it, else 'expm' (expm(df/dx dt))."""
+    if linearization is not None and linearization not in LINEARIZATIONS:
+        raise ValueError(f'unknown linearization {linearization!r}; valid: {list(LINEARIZATIONS)} or None (automatic)')
+    can_flow = discrete or kind == 'jax' or (kind == 'casadi' and backend == 'classic')
+    if linearization is None:
+        return 'flow' if can_flow else 'expm'
+    if linearization == 'expm' and discrete:
+        raise ValueError("linearization='expm' does not apply to a discrete-time model: its transition matrix is the "
+                         "Jacobian of the update map itself; use the default")
+    if linearization == 'flow' and not can_flow:
+        reason = ("a pybounds Simulator integrates with CasADi, which the -jax backend cannot differentiate; use a "
+                  "stochastic-*-classic method" if kind == 'casadi' else
+                  "this simulator's integrator is unknown (only f and h are available)")
+        raise ValueError(f"linearization='flow' is not available here: {reason}. Use linearization='expm'")
+    return linearization
+
+
 def _make_stochastic_builder(bounded, backend):
     """Builder for one stochastic method: linearizes the model along the trajectory (see pybounds.stochastic)."""
 
-    def build(simulator, t_sim, x_sim, u_sim, *, w, stream=False, eps=1e-5):
-        f, h = _model_functions(simulator, backend)
+    def build(simulator, t_sim, x_sim, u_sim, *, w, stream=False, eps=1e-5, linearization=None, aux_list=None):
+        kind = _simulator_kind(simulator)
+        discrete = _is_discrete(simulator, kind)
+        mode = _resolve_linearization(linearization, kind, backend, discrete)
+        if kind != 'casadi':
+            f, h = _model_functions(simulator, backend)
         dt = getattr(simulator, 'dt', None)
-        if dt is None:
+        if dt is None and not discrete:
             raise TypeError(f'the stochastic methods need the sample time: {type(simulator).__name__} has no dt')
         t_sim = np.ravel(np.asarray(t_sim, dtype=float))
         N = t_sim.shape[0]
@@ -325,13 +368,26 @@ def _make_stochastic_builder(bounded, backend):
             u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T
         u_sim = np.asarray(u_sim, dtype=float).reshape(N, -1)
         _window_size(w, N)   # fail before the (possibly slow) linearization
+        if aux_list is not None:
+            if len(aux_list) != N:
+                raise ValueError('aux_list must have same number of elements as t_sim')
+            if kind == 'casadi':   # a pybounds Simulator ignores aux, as its simulate() does
+                aux_list = None
 
-        if backend == 'classic' and _is_jax_simulator(simulator):
-            from .jax_simulator import _x64   # f_jax / h_jax evaluated in float64, as JaxSimulator does
-            with _x64():
-                Phi, C = _stochastic.linearize(f, h, x_sim, u_sim, dt, backend=backend, eps=eps)
-        else:
-            Phi, C = _stochastic.linearize(f, h, x_sim, u_sim, dt, backend=backend, eps=eps)
+        if kind == 'casadi' and backend == 'classic':
+            Phi, C = _stochastic._linearize_casadi_simulator(simulator, x_sim, u_sim, mode, eps)
+        elif kind == 'jax' and mode == 'flow':
+            Phi, C = _stochastic._linearize_jax_simulator(simulator, x_sim, u_sim, backend, eps, aux_list)
+        else:   # through f and h: expm(df/dx dt), or df/dx of a discrete update map
+            if kind == 'casadi':
+                f, h = _model_functions(simulator, backend)
+            context = contextlib.nullcontext()
+            if backend == 'classic' and kind == 'jax':
+                from .jax_simulator import _x64   # f_jax / h_jax evaluated in float64, as JaxSimulator does
+                context = _x64()
+            with context:
+                Phi, C = _stochastic.linearize(f, h, x_sim, u_sim, dt, backend=backend, eps=eps, discrete=discrete,
+                                               aux_list=aux_list)
 
         n, p = Phi.shape[1], C.shape[1]
         state_names = list(state_names) if state_names is not None else [f'x_{i}' for i in range(n)]
@@ -351,10 +407,14 @@ _BUILDERS = {
                                                               'parallel_perturbation', 'simulator_factory',
                                                               'n_workers'})),
     'bounds-jax': _Builder(_build_jax, frozenset({'aux_list', 'batch_size'})),
-    'stochastic-observability-classic': _Builder(_make_stochastic_builder('initial', 'classic'), frozenset({'eps'})),
-    'stochastic-observability-jax': _Builder(_make_stochastic_builder('initial', 'jax'), frozenset()),
-    'stochastic-constructability-classic': _Builder(_make_stochastic_builder('final', 'classic'), frozenset({'eps'})),
-    'stochastic-constructability-jax': _Builder(_make_stochastic_builder('final', 'jax'), frozenset()),
+    'stochastic-observability-classic': _Builder(_make_stochastic_builder('initial', 'classic'),
+                                                 frozenset({'eps', 'linearization', 'aux_list'})),
+    'stochastic-observability-jax': _Builder(_make_stochastic_builder('initial', 'jax'),
+                                             frozenset({'linearization', 'aux_list'})),
+    'stochastic-constructability-classic': _Builder(_make_stochastic_builder('final', 'classic'),
+                                                    frozenset({'eps', 'linearization', 'aux_list'})),
+    'stochastic-constructability-jax': _Builder(_make_stochastic_builder('final', 'jax'),
+                                                frozenset({'linearization', 'aux_list'})),
 }
 
 # Older method names, kept working: they resolve to (and are saved as) the names they map to
@@ -603,6 +663,43 @@ def _pybounds_version():
         return None
 
 
+def _is_diagonal(M):
+    return np.count_nonzero(M - np.diag(np.diag(M))) == 0
+
+
+def _block_diag(*blocks):
+    from scipy.linalg import block_diag
+    return block_diag(*blocks)
+
+
+class _WindowFisher:
+    """One window of a stochastic method's fisher() result, with FisherObservability's result attributes:
+    F (the Gramian), F_inv (the regularized inverse used for the error variance), R and error_variance."""
+
+    def __init__(self, F, F_inv, R, names):
+        self.F = pd.DataFrame(F, index=names, columns=names)
+        self.F_inv = pd.DataFrame(F_inv, index=names, columns=names)
+        self.R = R
+        self.error_variance = pd.DataFrame(np.diag(F_inv), index=names).T
+
+    def get_fisher_information(self):
+        return self.F.copy(), self.F_inv.copy(), self.R.copy()
+
+
+class _StochasticSlidingFisher:
+    """A stochastic method's fisher() result, with SlidingFisherObservability's result attributes
+    (FO, EV, EV_aligned, shift_index, get_minimum_error_variance)."""
+
+    def __init__(self, windows, EV, EV_aligned, shift_index):
+        self.FO = windows
+        self.n_window = len(windows)
+        self.EV, self.EV_aligned = EV, EV_aligned
+        self.shift_index = shift_index
+
+    def get_minimum_error_variance(self):
+        return self.EV_aligned.copy()
+
+
 # ---------------------------------------------------------------------------
 # ObservabilityAnalysis
 # ---------------------------------------------------------------------------
@@ -630,8 +727,9 @@ class ObservabilityAnalysis:
         'bounds-jax': the same O by autodiff through a JaxSimulator. ('jax' is an alias.)
         'stochastic-observability-classic' / 'stochastic-observability-jax': the stochastic observability Gramian
         (Boyacioglu & van Breugel 2025, Eq. 33), with process noise Q: Fisher information about the window's
-        initial state. The model is linearized along the trajectory (Phi = expm(A dt)), with finite differences
-        ('classic') or autodiff ('jax', f and h must use jax.numpy).
+        initial state. The model is linearized at every sample of the trajectory, with exact derivatives from the
+        CasADi model of a pybounds Simulator or finite differences ('classic'), or autodiff ('jax', f and h must use
+        jax.numpy). See the linearization method option.
         'stochastic-constructability-classic' / 'stochastic-constructability-jax': the stochastic constructability
         Gramian (Eq. 30), the Fisher information about the window's final state: its inverse is the posterior
         Cramer-Rao bound, which a Kalman filter's error covariance tracks.
@@ -647,7 +745,9 @@ class ObservabilityAnalysis:
         are then selected by the new names
     :param list z_state_names: names of the transformed states
     :param R: default measurement noise covariance for queries (scalar, dict per sensor, or matrix);
-        None means identity
+        None means identity. For the stochastic methods a matrix is either (p, p), the same at every step (noise
+        correlated between sensors), or (w*p, w*p) laid out like the observability matrix rows; noise correlated
+        across time steps is not supported there (the recursions assume measurement noise white in time)
     :param float | str | dict | np.ndarray lam: default regularization for inverting F; 1/lam is the ceiling on
         the minimum error variance. 'limit' computes lam -> 0 symbolically. A per-state regularizer
         diag(lam_i) replaces lam*I when lam is a dict of state name -> value or a 1-D array in the order of the
@@ -688,8 +788,15 @@ class ObservabilityAnalysis:
         'bounds-jax': batch_size (default None: all windows in one call), to compute at most that many windows per
         batched call. Smaller batches lower JAX's peak memory but make run() slower, and can change results in
         the last bit; see JaxSlidingEmpiricalObservabilityMatrix. Set integrator/substeps on the JaxSimulator.
-        ``'stochastic-*-classic'``: eps (finite-difference step of the linearization, default 1e-5).
-        The stochastic methods do not support aux_list
+        Stochastic methods: linearization, how each step's transition matrix Phi_k is computed. None (default)
+        picks 'flow' when the backend can differentiate the simulator's own integrator, else 'expm':
+        'flow' is the Jacobian of one sample of that integrator (a pybounds Simulator's CasADi/IDAS step, with
+        -classic; a JaxSimulator's RK4/Euler step with its substeps), or of the update map of a discrete-time model,
+        so the Gramians reproduce the bounds-* methods as Q -> 0; 'expm' is expm(df/dx dt), which freezes df/dx
+        over each step (the duality letter's discretization; the only choice for a simulator known only through
+        f and h). ``'stochastic-*-classic'`` also takes eps, the finite-difference step where derivatives are not
+        exact (default 1e-5). aux_list: sample k is linearized with aux_list[k] (f(x, u, aux), h(x, u, aux)), where
+        the bounds-* methods apply the window's first entry to the whole window; a pybounds Simulator ignores aux
 
     Memory: after run() the observability matrices are held once, as one (n_windows, w*p, n) float
     array (8 * n_windows * w * p * n bytes). Queries build one window's data at a time. The stochastic
@@ -1165,7 +1272,8 @@ class ObservabilityAnalysis:
         self._t_sim = t_sim
         self._O_index = np.arange(n_windows)
         self._w = w
-        self._source = self._window_data = None
+        self._source = self._lin if self._settings['keep_source'] else None   # no perturbed simulations to keep
+        self._window_data = None
         self.clear_cache()
 
     def _assemble(self, windows, n_windows, O_index, storage):
@@ -1308,9 +1416,12 @@ class ObservabilityAnalysis:
     def O_df_sliding(self):
         """New DataFrames of every window's observability matrix (transformed if z_function is set).
 
-        This builds all windows at once, a full copy of O; use observability_matrix(k) for one window.
+        This builds all windows at once, a full copy of O; use observability_matrix(k) for one window. For the
+        stochastic methods these are the equivalent noise-free matrices (see observability_matrix).
         """
         self._require_computed()
+        if self._Phi is not None:
+            return [self._stochastic_window_matrix(k) for k in range(self._n_windows)]
         return list(self._frames('O_df_sliding'))
 
     @property
@@ -1460,9 +1571,8 @@ class ObservabilityAnalysis:
         R, lam = self._resolve(R, lam, sensors, states)
         alignment = self._resolve_alignment(alignment)
         if self._Phi is not None:
-            raise ValueError(f"fisher() builds per-window FisherObservability objects from observability matrices, "
-                             f"which method {self.method!r} does not build; use fisher_information() for each "
-                             f"window's F, or min_error_variance()")
+            return self._stochastic_sliding_fisher(states, sensors, time_steps, R, lam, force_R_scalar,
+                                                   self._shift_index(alignment))
         if self._O is None:
             raise ValueError(f"fisher() builds per-window FisherObservability objects from the observability "
                              f"matrices, which storage={self.storage!r} does not keep; use fisher_information() "
@@ -1614,8 +1724,9 @@ class ObservabilityAnalysis:
         values = np.array([np.diag(_fisher_inverse(F_k, lam)) for F_k in F])
         return self._aligned_error_variance(values, states or self._state_names, shift_index)
 
-    def _aligned_error_variance(self, values, names, shift_index):
-        """One row of error variances per window, placed on the trajectory like SlidingFisherObservability."""
+    def _aligned_error_variance(self, values, names, shift_index, both=False):
+        """One row of error variances per window, placed on the trajectory like SlidingFisherObservability
+        (with both=True: (EV, EV_aligned), as SlidingFisherObservability keeps them)."""
         EV = pd.DataFrame(values, columns=names)
         n_window = values.shape[0]
         if self._t_sim is None:
@@ -1624,8 +1735,9 @@ class ObservabilityAnalysis:
             time = np.array(self._t_sim)
             dt = np.mean(np.diff(time)) if len(time) > 1 else 0.0
         EV.insert(0, 'time_initial', time[:n_window])
-        return _align_error_variance(EV, time, shift_index, shift_index * dt,
-                                     aligned=n_window > 1 or self._t_sim is not None)[1]
+        frames = _align_error_variance(EV, time, shift_index, shift_index * dt,
+                                       aligned=n_window > 1 or self._t_sim is not None)
+        return frames if both else frames[1]
 
     # ------------------------------------------------------------------ stochastic methods
 
@@ -1674,17 +1786,58 @@ class ObservabilityAnalysis:
                              f'got {Q!r}') from None
         return _stochastic.process_covariance(q, names)
 
-    def _measurement_information(self, R, sensors, force_R_scalar):
-        """R^-1 of one time-step for the selected sensors, from a scalar, per-sensor dict or None R."""
+    def _measurement_noise(self, R, sensors, force_R_scalar):
+        """The measurement noise covariance of each step of a window, for the selected sensors: w (p, p) blocks.
+
+        R may be a scalar, a dict per sensor or None (identity), the same at every step; a (p, p) matrix (an array in
+        sensor order, or a DataFrame labelled by sensor) for noise correlated between sensors, the same at every
+        step; or a (w*p, w*p) matrix laid out like the rows of the observability matrix (an array in that order, or
+        a DataFrame labelled by (sensor, time_step)), whose diagonal blocks may differ per step. Noise correlated
+        across time steps is not supported: the recursions assume measurement noise that is white in time.
+        """
         if _is_matrix(R):
-            raise ValueError(f'method {self.method!r} needs one noise level per sensor (a scalar or dict R); '
-                             f'a matrix R is not supported')
+            if force_R_scalar:
+                raise Exception('R must be a scalar')
+            idx = [self._sensor_names.index(s) for s in sensors]
+            return [B[np.ix_(idx, idx)] for B in self._R_blocks(R)]
         if force_R_scalar and not np.isscalar(R):
             raise Exception('R must be a scalar')
         if R is None:
-            warnings.warn('R not set, defaulting to identity matrix', stacklevel=4)
+            warnings.warn('R not set, defaulting to identity matrix', stacklevel=5)
         r = [1.0 if R is None else float(R[s] if isinstance(R, dict) else np.squeeze(R)) for s in sensors]
-        return np.diag(1.0 / np.array(r))
+        return [np.diag(np.array(r))] * self._w
+
+    def _R_blocks(self, R):
+        """A matrix R as w per-step (p, p) covariance blocks over all sensors (see _measurement_noise)."""
+        names, w = self._sensor_names, self._w
+        p = len(names)
+        if isinstance(R, pd.DataFrame):
+            labels = self._index if isinstance(R.index, pd.MultiIndex) else names
+            M = R.loc[labels, labels].to_numpy(dtype=float)
+        else:
+            M = np.asarray(R, dtype=float)
+        if M.shape == (p, p):
+            return [M] * w
+        if M.shape != (w * p, w * p):
+            raise ValueError(f'a matrix R must be ({p}, {p}) (one step, sensors {names}) or ({w * p}, {w * p}) (a '
+                             f'window, rows ordered like the observability matrix); got {M.shape}')
+        blocks = [M[j * p:(j + 1) * p, j * p:(j + 1) * p] for j in range(w)]
+        between_steps = M.copy()
+        for j in range(w):
+            between_steps[j * p:(j + 1) * p, j * p:(j + 1) * p] = 0.0
+        if np.any(between_steps != 0):
+            raise ValueError(f'R correlates measurement noise across time steps, which method {self.method!r} '
+                             f'cannot represent: its recursions assume measurement noise that is white in time. '
+                             f'Use a bounds-* method, or an R whose off-diagonal time blocks are zero')
+        return blocks
+
+    def _measurement_information(self, R, sensors, force_R_scalar):
+        """R^-1 of each step of a window for the selected sensors: w (p, p) blocks."""
+        blocks = self._measurement_noise(R, sensors, force_R_scalar)
+        if all(B is blocks[0] for B in blocks):
+            Rinv = np.linalg.inv(blocks[0]) if not _is_diagonal(blocks[0]) else np.diag(1.0 / np.diag(blocks[0]))
+            return [Rinv] * len(blocks)
+        return [np.linalg.inv(B) for B in blocks]
 
     def _stochastic_fisher(self, states, sensors, time_steps, R, Q, force_R_scalar):
         """Stochastic Gramian of every window for a selection: (n_windows, n_states, n_states).
@@ -1695,8 +1848,8 @@ class ObservabilityAnalysis:
         """
         selected = sensors or self._sensor_names
         C = self._C[:, [self._sensor_names.index(s) for s in selected], :]
-        Rinv = self._measurement_information(R, selected, force_R_scalar)
-        Rinvs = [Rinv if time_steps is None or j in time_steps else np.zeros_like(Rinv) for j in range(self._w)]
+        Rinvs = self._measurement_information(R, selected, force_R_scalar)
+        Rinvs = [Rinv if time_steps is None or j in time_steps else np.zeros_like(Rinv) for j, Rinv in enumerate(Rinvs)]
         Qinv = np.linalg.inv(self._process_noise(Q))
         F = _stochastic.sliding_gramians(self._Phi, C, self._w, Qinv, Rinvs, bounded=self._bounded)
         if self._dxdz_sliding is not None:
@@ -1709,17 +1862,39 @@ class ObservabilityAnalysis:
 
     def _stochastic_error_variance(self, states, sensors, time_steps, R, lam, Q, force_R_scalar, shift_index):
         F = self._stochastic_fisher(states, sensors, time_steps, R, Q, force_R_scalar)
+        F_inv = self._stochastic_inverse(F, lam)
+        values = np.diagonal(F_inv, axis1=-2, axis2=-1)
+        return self._aligned_error_variance(values, states or self._state_names, shift_index)
+
+    @staticmethod
+    def _stochastic_inverse(F, lam):
+        """(F + lam)^-1 of every window, after clipping negative eigenvalues of F to zero."""
         # F is positive semi-definite in exact arithmetic, but the recursions' Q^-1 cancellations leave a noise
         # floor that can push small eigenvalues negative, and an eigenvalue near -lam inverts to a large negative
         # variance. O^T R^-1 O is PSD by construction, so clip for a comparable inverse.
         eigenvalues, eigenvectors = np.linalg.eigh(F)
         F = (eigenvectors * np.clip(eigenvalues, 0.0, None)[:, None, :]) @ np.swapaxes(eigenvectors, -1, -2)
         if isinstance(lam, str) and lam == 'limit':
-            values = np.array([np.diag(_fisher_inverse(F_k, lam)) for F_k in F])
-        else:   # the regularizer is added after the clip
-            regularizer = lam * np.eye(F.shape[-1]) if np.ndim(lam) == 0 else np.diag(lam)
-            values = np.diagonal(np.linalg.inv(F + regularizer), axis1=-2, axis2=-1)
-        return self._aligned_error_variance(values, states or self._state_names, shift_index)
+            return np.array([_fisher_inverse(F_k, lam) for F_k in F])
+        regularizer = lam * np.eye(F.shape[-1]) if np.ndim(lam) == 0 else np.diag(lam)   # added after the clip
+        return np.linalg.inv(F + regularizer)
+
+    def _stochastic_sliding_fisher(self, states, sensors, time_steps, R, lam, force_R_scalar, shift_index):
+        """fisher() for the stochastic methods: per-window F, F_inv, R and error variance, aligned like
+        min_error_variance (F is the Gramian, F_inv the regularized inverse of its clipped form)."""
+        Q = self._resolve_Q(_UNSET)
+        F = self._stochastic_fisher(states, sensors, time_steps, R, Q, force_R_scalar)
+        F_inv = self._stochastic_inverse(F, lam)
+        names = list(states or self._state_names)
+        selected = list(sensors or self._sensor_names)
+        steps = list(time_steps) if time_steps is not None else list(self._time_steps)
+        blocks = self._measurement_noise(R, selected, force_R_scalar)
+        rows = pd.MultiIndex.from_tuples([(s, j) for j in steps for s in selected], names=['sensor', 'time_step'])
+        R_window = pd.DataFrame(_block_diag(*[blocks[j] for j in steps]), index=rows, columns=rows)
+        windows = [_WindowFisher(F[k], F_inv[k], R_window, names) for k in range(len(F))]
+        EV, EV_aligned = self._aligned_error_variance(np.diagonal(F_inv, axis1=-2, axis2=-1), names, shift_index,
+                                                      both=True)
+        return _StochasticSlidingFisher(windows, EV, EV_aligned, shift_index)
 
     def observability_matrix(self, window=0, states=None, sensors=None, time_steps=None):
         """Copy of one window's observability matrix, optionally restricted to a selection
@@ -1813,10 +1988,7 @@ class ObservabilityAnalysis:
         R_r, lam_r = self._resolve(R, lam, sensors_l, states_l)
         Q_r = self._resolve_Q(Q)
         alignment_r = self._resolve_alignment(alignment)
-        if include_observability_matrices and self._Phi is not None:
-            raise ValueError(f'include_observability_matrices needs observability matrices, which method '
-                             f'{self.method!r} does not build')
-        if include_observability_matrices and self._O is None:
+        if include_observability_matrices and self._O is None and self._Phi is None:
             raise ValueError(f"include_observability_matrices needs the observability matrices, which "
                              f"storage={self.storage!r} does not keep; use {_NEEDS_O}")
         ev = self.min_error_variance(states_l, sensors_l, time_steps_l, R=R_r, lam=lam_r, Q=Q_r,
@@ -1869,7 +2041,16 @@ class ObservabilityAnalysis:
         return 'each window is stamped at the state it bounds, its initial time-step, time_initial'
 
     def _save_observability_matrices(self, path):
-        arrays = {'O': self._O,
+        if self._Phi is not None:   # the equivalent noise-free matrices, and the linearization they come from
+            O = np.stack([frame.to_numpy() for frame in self.O_df_sliding]) if self._n_windows else None
+            extra = {'Phi': np.asarray(self._Phi), 'C': np.asarray(self._C),
+                     'model_state_names': np.array(self._model_state_names, dtype=str),
+                     'bounded': np.array(self._bounded)}
+            if self._dxdz_sliding is not None:
+                extra['dxdz_sliding'] = np.asarray(self._dxdz_sliding)
+        else:
+            O, extra = self._O, {}
+        arrays = {'O': O,
                   'state_names': np.array(self._state_names, dtype=str),
                   'sensor': np.array(self._index.get_level_values('sensor'), dtype=str),
                   'time_step': np.array(self._index.get_level_values('time_step'), dtype=int),
@@ -1877,7 +2058,7 @@ class ObservabilityAnalysis:
         if self._t_sim is not None:
             arrays['t_sim'] = np.asarray(self._t_sim, dtype=float)
             arrays['window_time_initial'] = arrays['t_sim'][arrays['O_index']]
-        np.savez(path, **arrays)
+        np.savez(path, **arrays, **extra)
 
     def __repr__(self):
         status = f'computed, {self._n_windows} windows' if self.is_computed else 'not computed'

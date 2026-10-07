@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.abspath('..'))
 project = 'pybounds'
 copyright = '2025, Ben Cellini, Burak Boyacioglu, Floris van Breugel'
 author = 'Ben Cellini, Burak Boyacioglu, Floris van Breugel'
-release = '0.3.0'
+release = '0.3.1'
 
 extensions = [
     'sphinx.ext.autodoc',
