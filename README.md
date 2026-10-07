@@ -33,6 +33,19 @@ or from source, for development, after cloning the repo:
 pip install -e .
 ```
 
+### With the JAX backend
+
+The JAX backend (exact autodiff Jacobians, and the `-jax` methods of `ObservabilityAnalysis`) needs JAX, which is an optional dependency. Install it with the `jax` extra:
+
+```bash
+pip install "pybounds[jax]"             # or, to upgrade: pip install --upgrade "pybounds[jax]"
+pip install -e ".[jax]"                 # from source
+```
+
+- **Keep the quotes.** In zsh (the default shell on macOS), unquoted square brackets are treated as a filename pattern, so `pip install pybounds[jax]` fails with "no matches found".
+- **The extra installs the CPU build of JAX** (`jax[cpu]`). For a GPU, install a CUDA build of JAX yourself, for example `pip install -U "jax[cuda12]"`.
+- **JAX already installed?** Plain `pip install pybounds` is enough: pybounds detects JAX when it is imported.
+
 ## Quick Start
 
 To demonstrate pybounds with a simple example we use a downward-pointing camera moving horizontally with acceleration that is controlled directly with control inputs (u). The two states are ground speed `g` and (constant) altitude `d`, and the only measurement is the ventral optic flow ratio `r = g/d`. We use pybounds to understand when `g` and `d` are observable. 
@@ -174,7 +187,7 @@ pybounds includes a JAX backend (`JaxSimulator`, `JaxSlidingEmpiricalObservabili
 | Mono-camera | 2 | 895 | ~21 s | ~1.1 s | **~19×** |
 | Fly-wind | 18 | 37 | ~6 s | ~2.6 s | **~2.4×** |
 
-**To use the JAX backend**, install JAX and rewrite your dynamics `f` and measurement `h` using `jax.numpy` instead of `numpy`. See the notebooks below for worked examples.
+**To use the JAX backend**, install JAX ([see Installing](#with-the-jax-backend)) and rewrite your dynamics `f` and measurement `h` using `jax.numpy` instead of `numpy`. See the notebooks below for worked examples.
 
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/mono_camera_example_jax.ipynb) Mono-camera — JAX accelerated: [mono_camera_example_jax.ipynb](examples/mono_camera_example_jax.ipynb)
 *  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vanbreugel-lab/pybounds/blob/main/examples/fly_wind_example_jax.ipynb) Fly-wind — JAX accelerated: [fly_wind_example_jax.ipynb](examples/fly_wind_example_jax.ipynb)
