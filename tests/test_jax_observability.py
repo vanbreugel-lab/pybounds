@@ -506,6 +506,14 @@ class TestBackendMismatch:
         with pytest.raises(TypeError, match='use SlidingEmpiricalObservabilityMatrix instead'):
             JaxSlidingEmpiricalObservabilityMatrix(simulator, seom.t_sim, seom.x_sim, seom.u_sim, w=WINDOW_SIZE)
 
+    def test_compute_observability_infers_jax(self, jax_sim, seom):
+        """Regression for #17: use_jax is inferred from the simulator type when not given."""
+        kwargs = dict(R={'r': 0.1}, w=WINDOW_SIZE)
+        pd.testing.assert_frame_equal(
+            pybounds.compute_observability(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, **kwargs),
+            pybounds.compute_observability(jax_sim, seom.t_sim, seom.x_sim, seom.u_sim, use_jax=True, **kwargs),
+            check_exact=True)
+
     @pytest.mark.parametrize('use_jax', [False, True])
     def test_compute_observability_flag_mismatch(self, simulator, jax_sim, seom, use_jax):
         sim = simulator if use_jax else jax_sim   # deliberately the wrong backend for the flag

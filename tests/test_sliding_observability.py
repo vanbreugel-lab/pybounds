@@ -193,3 +193,23 @@ class TestSEOMWindowSize:
         t_sim, x_sim, u_sim, _ = simulation_output
         with pytest.raises(ValueError, match='must be at least 1'):
             pybounds.SlidingEmpiricalObservabilityMatrix(simulator, t_sim, x_sim, u_sim, w=w)
+
+
+class TestOneDimensionalInputs:
+    """Regression for #15: a 1-D u_sim array (one input) crashed with IndexError when windows were sliced."""
+
+    def test_1d_u_sim_matches_2d(self, simulator, seom):
+        x_sim = np.column_stack([seom.x_sim[:, 0], seom.x_sim[:, 1]])
+        u_1d = np.ravel(seom.u_sim)
+        assert u_1d.ndim == 1
+        one = pybounds.SlidingEmpiricalObservabilityMatrix(simulator, seom.t_sim, x_sim, u_1d, w=WINDOW_SIZE, eps=EPS)
+        two = pybounds.SlidingEmpiricalObservabilityMatrix(simulator, seom.t_sim, x_sim, u_1d[:, None],
+                                                           w=WINDOW_SIZE, eps=EPS)
+        assert one.u_sim.shape == (N_STEPS_SLIDING, 1)
+        for a, b in zip(one.O_sliding, two.O_sliding):
+            np.testing.assert_array_equal(a, b)
+
+    def test_1d_u_sim_length_mismatch_still_reported(self, simulator, seom):
+        with pytest.raises(ValueError, match='t_sim & u_sim must have same number of rows'):
+            pybounds.SlidingEmpiricalObservabilityMatrix(simulator, seom.t_sim, seom.x_sim,
+                                                         np.ravel(seom.u_sim)[:-1], w=WINDOW_SIZE)

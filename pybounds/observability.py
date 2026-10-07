@@ -105,7 +105,8 @@ def _reject_jax_simulator(simulator, cls_name):
     jax_module = sys.modules.get(f'{__package__}.jax_simulator')
     if jax_module is not None and isinstance(simulator, jax_module.JaxSimulator):
         raise TypeError(f'{cls_name} does not accept a JaxSimulator; use Jax{cls_name} instead '
-                        '(or compute_observability(..., use_jax=True)).')
+                        '(compute_observability: use_jax=True, or leave use_jax unset to pick the backend from '
+                        'the simulator).')
 
 
 def _ordered_values(d, names, label):
@@ -383,7 +384,8 @@ class SlidingEmpiricalObservabilityMatrix:
         if isinstance(u_sim, dict):
             self.u_sim = np.vstack(_ordered_values(u_sim, getattr(simulator, 'input_names', None), 'u_sim')).T
         else:
-            self.u_sim = np.array(u_sim)
+            u_sim = np.array(u_sim)
+            self.u_sim = u_sim.reshape(u_sim.shape[0], -1)  # (N, m), also for a single input
 
         # Check sizes
         if self.N != self.x_sim.shape[0]:
@@ -937,8 +939,16 @@ def _transform_O_df_list(O_df_list, x0_list, z_function, z_state_names, return_d
 
 
 class ObservabilityMatrixImage:
-    def __init__(self, O, state_names=None, sensor_names=None, vmax_percentile=100, vmin_ratio=1.0, cmap='bwr'):
+    def __init__(self, O, state_names=None, sensor_names=None, vmax_percentile=100, vmin_ratio=0.0, cmap='bwr'):
         """ Display an image of an observability matrix.
+
+        :param pd.DataFrame O: observability matrix with a ('sensor', 'time_step') row index and one column per state
+        :param list state_names: axis labels for the states (length n, or length 1 for a numbered name)
+        :param list sensor_names: axis labels for the sensors (length p, or length 1 for a numbered name)
+        :param float vmax_percentile: default for plot(): percentile of |O| used as the color range
+        :param float vmin_ratio: default for plot(): entries smaller than vmin_ratio * the color range (and larger
+            than 1e-6) are drawn at that magnitude, so small values stay visible
+        :param str cmap: default for plot(): matplotlib colormap
         """
 
         # Plotting parameters
@@ -963,8 +973,9 @@ class ObservabilityMatrixImage:
             self.time_steps = np.array(O.index.get_level_values('time_step'))
             self.sensor_names_default = list(pd.unique(np.array(self.sensors, dtype=object)))
             self.time_steps_default = np.unique(self.time_steps)
-        else:  # numpy matrix
-            raise TypeError('n-sensor must be an integer value when O is given as a numpy matrix')
+        else:
+            raise TypeError("O must be a pandas DataFrame with a ('sensor', 'time_step') row index and one column "
+                            "per state")
 
         self.n_sensor = len(self.sensor_names_default)  # number of sensors
         self.n_time_step = int(self.pw / self.n_sensor)  # number of time-steps
@@ -994,9 +1005,8 @@ class ObservabilityMatrixImage:
                 def label(p, k):
                     return '$' + self.sensor_names[p] + ',_{' + 'k=' + str(k) + '}$'
 
-            elif len(sensor_names) == 1:
-                self.sensor_names = [sensor_names[0] + '_{' + str(n) + '}$' for n in range(1, self.n_sensor + 1)]
-                self.sensor_names = LatexConverter.convert_to_latex(self.sensor_names, remove_dollar_signs=True)
+            elif len(sensor_names) == 1:   # one name, numbered per sensor as in the row labels
+                self.sensor_names = ['{' + sensor_names[0] + '}_{' + str(p) + '}' for p in range(self.n_sensor)]
 
                 def label(p, k):
                     return '${' + sensor_names[0] + '}_{' + str(p) + ',k=' + str(k) + '}$'
@@ -1014,15 +1024,21 @@ class ObservabilityMatrixImage:
         self.measurement_names = [label(self.sensor_names_default.index(s), k)
                                   for s, k in zip(self.sensors, self.time_steps)]
 
-    def plot(self, vmax_percentile=100, vmin_ratio=0.0, vmax_override=None, cmap='bwr', grid=True, scale=1.0, dpi=150,
-             ax=None):
+    def plot(self, vmax_percentile=None, vmin_ratio=None, vmax_override=None, cmap=None, grid=True, scale=1.0,
+             dpi=150, ax=None):
         """ Plot the observability matrix.
+
+        vmax_percentile, vmin_ratio and cmap default to the values given to the constructor. A value given here
+        replaces the stored one, so it also applies to later calls.
         """
 
         # Plot properties
-        self.vmax_percentile = vmax_percentile
-        self.vmin_ratio = vmin_ratio
-        self.cmap = cmap
+        if vmax_percentile is not None:
+            self.vmax_percentile = vmax_percentile
+        if vmin_ratio is not None:
+            self.vmin_ratio = vmin_ratio
+        if cmap is not None:
+            self.cmap = cmap
 
         if vmax_override is None:
             self.crange = np.percentile(np.abs(self.O), self.vmax_percentile)
@@ -1031,12 +1047,9 @@ class ObservabilityMatrixImage:
 
         # Display O (a copy: clipping must not modify self.O, and .values is read-only under pandas copy-on-write)
         O_disp = self.O.to_numpy(dtype=float, copy=True)
-        # O_disp = np.nan_to_num(np.sign(O_disp) * np.log(np.abs(O_disp)), nan=0.0)
-        for n in range(self.n):
-            for m in range(self.pw):
-                oval = O_disp[m, n]
-                if (np.abs(oval) < (self.vmin_ratio * self.crange)) and (np.abs(oval) > 1e-6):
-                    O_disp[m, n] = self.vmin_ratio * self.crange * np.sign(oval)
+        floor = self.vmin_ratio * self.crange
+        small = (np.abs(O_disp) < floor) & (np.abs(O_disp) > 1e-6)   # raise small entries to the floor, keeping sign
+        O_disp[small] = floor * np.sign(O_disp[small])
 
         # Plot
         if ax is None:
@@ -1091,25 +1104,29 @@ class ObservabilityMatrixImage:
 
 
 def compute_observability(simulator, t_sim, x_sim, u_sim, R,
-                          w=6, eps=1e-4, lam=DEFAULT_LAM, use_jax=False):
+                          w=6, eps=1e-4, lam=DEFAULT_LAM, use_jax=None):
     """Compute sliding-window Fisher observability in one call.
+
+    The same as ``ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, w=w, R=R, lam=lam, eps=eps)``
+    followed by ``.run().min_error_variance()``. Note the default finite-difference step here is
+    ``eps=1e-4``, while ``ObservabilityAnalysis`` defaults to 1e-5: pass ``eps=1e-5`` to reproduce an
+    analysis built without ``eps``.
 
     Parameters
     ----------
     simulator : Simulator or JaxSimulator
-        A configured simulator instance.  Pass a ``JaxSimulator`` when
-        ``use_jax=True``.
+        A configured simulator instance.
     t_sim, x_sim, u_sim : trajectory returned by simulator.simulate(..., return_full_output=True)
     R : dict  — sensor noise covariance, e.g. {'r': 0.1}
     w : int   — sliding window length (time steps)
-    eps : float — finite-difference perturbation size (ignored when use_jax=True)
+    eps : float — finite-difference perturbation size (ignored by the JAX backend)
     lam : float — Chernoff regularization for Fisher inversion, (F + lam*I)^-1.
         1/lam is the ceiling on the minimum error variance, so values near 1/lam
         (1e8 for the default) indicate unobservable states.
-    use_jax : bool — if True, use JAX autodiff (exact Jacobians, faster for many windows).
-        Requires JAX to be installed and ``simulator`` to be a ``JaxSimulator`` whose
-        ``f`` and ``h`` functions are written with ``jax.numpy`` (``jnp``) instead of
-        ``numpy``.  See ``JaxSimulator`` for details.
+    use_jax : bool or None — None (default) picks the backend from the simulator: JAX autodiff
+        (exact Jacobians, faster for many windows) for a ``JaxSimulator``, whose ``f`` and ``h`` are
+        written with ``jax.numpy``, finite differences otherwise. True / False require the matching
+        simulator type.
 
     Returns
     -------
@@ -1119,10 +1136,11 @@ def compute_observability(simulator, t_sim, x_sim, u_sim, R,
     See ``ObservabilityAnalysis`` to keep the observability matrices and query
     other selections of states, sensors and time-steps without recomputing them.
     """
-    from .analysis import ObservabilityAnalysis   # imported here: analysis imports this module
+    from .analysis import ObservabilityAnalysis, _is_jax_simulator   # imported here: analysis imports this module
 
+    if use_jax is None:
+        use_jax = _is_jax_simulator(simulator)
     method_options = {} if use_jax else {'eps': eps}   # eps does not apply to the JAX backend
     analysis = ObservabilityAnalysis(simulator, t_sim, x_sim, u_sim, method='bounds-jax' if use_jax else 'bounds-empirical',
                                      w=w, R=R, lam=lam, **method_options)
-    return analysis.run().min_error_variance(states=simulator.state_names, sensors=simulator.measurement_names,
-                                             time_steps=None if w is None else np.arange(w))
+    return analysis.run().min_error_variance()

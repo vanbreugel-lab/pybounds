@@ -63,7 +63,7 @@ Memory: `run()` streams windows (builders return a `_WindowStream`, or the JAX b
 
 ### JAX backend
 
-`JaxSimulator`, `JaxEmpiricalObservabilityMatrix`, and `JaxSlidingEmpiricalObservabilityMatrix` (in [pybounds/jax_simulator.py](pybounds/jax_simulator.py)) replace finite-difference Jacobians with exact autodiff via `jax.jacfwd` + `jax.vmap`. Requires `f` and `h` to use `jax.numpy` instead of `numpy`. The `compute_observability()` helper accepts `use_jax=True` to route through this backend.
+`JaxSimulator`, `JaxEmpiricalObservabilityMatrix`, and `JaxSlidingEmpiricalObservabilityMatrix` (in [pybounds/jax_simulator.py](pybounds/jax_simulator.py)) replace finite-difference Jacobians with exact autodiff via `jax.jacfwd` + `jax.vmap`. Requires `f` and `h` to use `jax.numpy` instead of `numpy`. The `compute_observability()` helper routes through this backend for a `JaxSimulator` (`use_jax` defaults to None, inferred from the simulator type).
 
 ### Dependencies
 
