@@ -55,10 +55,12 @@ Requirements and gotchas
   for that comparison. The per-state version of this trap is the *spread* of Q, not its absolute
   value: see ``MAX_Q_SPREAD``.
 - **The linearization is the other half of the method.** The recursions are for a discrete-time
-  *linear* time-varying system. ``linearize`` linearizes a nonlinear model along the realized
-  trajectory, with ``Phi_k = expm(A_k dt)``, which the empirical method does not need to do (it
-  differentiates the true nonlinear flow). Expect the two to agree to the discretization error of
-  ``Phi``, not to machine precision.
+  *linear* time-varying system, so a nonlinear model is linearized at every sample of the realized
+  trajectory. ``ObservabilityAnalysis`` takes ``Phi_k`` from the simulator's own integrator step by
+  default (``linearization='flow'``), and the stochastic Gramians then reproduce the empirical
+  method's Fisher information as ``Q -> 0``, to integrator and finite-difference accuracy, on the
+  model's own trajectory. ``linearize`` (for a model given only as ``f`` and ``h``) uses
+  ``Phi_k = expm(A_k dt)`` instead, which freezes ``A`` over each step.
 
 Transcription notes
 -------------------
@@ -118,40 +120,67 @@ def _fd_jacobian(func, x, u, eps):
     return jacobian
 
 
-def _jacobians_finite_difference(f, h, x_traj, u_traj, eps):
-    """ (A, C) at every sample by central differences. Shapes (N, n, n) and (N, p, n). """
+def _with_aux(func, aux):
+    """func(x, u) when aux is None, else x, u -> func(x, u, aux) (the JaxSimulator convention)."""
+    return func if aux is None else (lambda x, u: func(x, u, aux))
 
-    A = np.stack([_fd_jacobian(f, x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
-    C = np.stack([_fd_jacobian(h, x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
+
+def _jacobians_finite_difference(f, h, x_traj, u_traj, eps, aux_list=None):
+    """ (df/dx, dh/dx) at every sample by central differences. Shapes (N, n_f, n) and (N, p, n). """
+
+    aux_list = [None] * len(x_traj) if aux_list is None else aux_list
+    A = np.stack([_fd_jacobian(_with_aux(f, aux_list[k]), x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
+    C = np.stack([_fd_jacobian(_with_aux(h, aux_list[k]), x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
 
     return A, C
 
 
-def _jacobians_jax(f, h, x_traj, u_traj):
-    """ (A, C) at every sample by forward-mode autodiff, batched over the trajectory.
-
-    ``f`` and ``h`` must be written with ``jax.numpy``. They often return a Python list of scalars,
-    which is stacked with ``jnp.asarray``. float64 is enabled only for this computation, as in
-    ``JaxSimulator``.
-    """
-
+def _jax_modules():
     try:
         import jax
         import jax.numpy as jnp
-        from .jax_simulator import _x64
+        from .jax_simulator import _x64, _to_aux
     except ImportError:
         raise ImportError('the stochastic *-jax methods need JAX. Install it with: pip install jax[cpu]') from None
+    return jax, jnp, _x64, _to_aux
 
-    f_arr = lambda x, u: jnp.ravel(jnp.asarray(f(x, u)))
-    h_arr = lambda x, u: jnp.ravel(jnp.asarray(h(x, u)))
+
+def _stack_aux(aux_list):
+    """aux_list (one pytree per sample) stacked along a leading axis for vmap, or None."""
+    if aux_list is None:
+        return None
+    jax, jnp, _, _to_aux = _jax_modules()
+    try:
+        return jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *[_to_aux(a) for a in aux_list])
+    except (ValueError, TypeError) as error:
+        raise ValueError('aux_list entries must all have the same structure and array shapes so they can be '
+                         'batched across samples') from error
+
+
+def _jacobians_jax(f, h, x_traj, u_traj, aux_list=None):
+    """ (df/dx, dh/dx) at every sample by forward-mode autodiff, batched over the trajectory.
+
+    ``f`` and ``h`` must be written with ``jax.numpy``. They often return a Python list of scalars,
+    which is stacked with ``jnp.asarray``. float64 is enabled only for this computation, as in
+    ``JaxSimulator``. With aux_list, sample k calls ``f(x, u, aux_list[k])``.
+    """
+
+    jax, jnp, _x64, _ = _jax_modules()
+
+    def as_vector(func):
+        def wrapped(x, u, aux):
+            return jnp.ravel(jnp.asarray(func(x, u) if aux is None else func(x, u, aux)))
+        return wrapped
 
     with _x64():
         x_batch = jnp.asarray(x_traj, dtype=jnp.float64)
         u_batch = jnp.asarray(u_traj, dtype=jnp.float64)
-        jac_f = jax.jit(jax.vmap(jax.jacfwd(f_arr, argnums=0), in_axes=(0, 0)))
-        jac_h = jax.jit(jax.vmap(jax.jacfwd(h_arr, argnums=0), in_axes=(0, 0)))
+        aux_batch = _stack_aux(aux_list)
+        in_axes = (0, 0, None if aux_batch is None else 0)
+        jac_f = jax.jit(jax.vmap(jax.jacfwd(as_vector(f), argnums=0), in_axes=in_axes))
+        jac_h = jax.jit(jax.vmap(jax.jacfwd(as_vector(h), argnums=0), in_axes=in_axes))
         try:
-            A, C = np.array(jac_f(x_batch, u_batch)), np.array(jac_h(x_batch, u_batch))
+            A, C = np.array(jac_f(x_batch, u_batch, aux_batch)), np.array(jac_h(x_batch, u_batch, aux_batch))
         except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError) as error:
             raise TypeError('JAX could not trace f or h: write them with jax.numpy (jnp) instead of numpy, '
                             'or use a *-classic method') from error
@@ -159,29 +188,34 @@ def _jacobians_jax(f, h, x_traj, u_traj):
     return A, C
 
 
-def linearize(f, h, x_traj, u_traj, dt, backend='classic', eps=1e-5):
-    """ Linearize a nonlinear model at every sample of a realized trajectory.
+def linearize(f, h, x_traj, u_traj, dt, backend='classic', eps=1e-5, discrete=False, aux_list=None):
+    """ Linearize a model given as functions at every sample of a realized trajectory.
 
     Returns the per-step **discrete** transition matrices and measurement Jacobians of the letter's
-    Eq. (22), ``dx_{k+1} = Phi_k dx_k + w_k``, ``dy_k = C_k dx_k + v_k``::
+    Eq. (22), ``dx_{k+1} = Phi_k dx_k + w_k``, ``dy_k = C_k dx_k + v_k``. For continuous dynamics::
 
         A_k = df/dx |(x_k, u_k),   Phi_k = expm(A_k * dt),   C_k = dh/dx |(x_k, u_k)
 
-    ``expm`` rather than the Jacobian of an integrator step, for two reasons. The duality construction
-    the observability recursion is derived from needs ``Phi`` invertible, which a matrix exponential
-    is by construction. And it leaves the two backends differing in exactly one thing -- how ``A``
-    and ``C`` are differentiated -- so a discrepancy between them is attributable. The cost is that
-    ``A`` is frozen at the left endpoint of each step, an ``O(dt^2)`` local error when the
-    linearization moves quickly within one sample.
+    which freezes ``A`` at the left endpoint of each step, an ``O(dt^2)`` local error when the
+    linearization moves quickly within one sample. For a discrete-time model (``discrete=True``, f is the
+    update map ``x_{k+1} = f(x_k, u_k)``) ``Phi_k = df/dx`` exactly.
 
-    :param callable f: continuous-time dynamics, x_dot = f(x, u)
+    ``ObservabilityAnalysis`` uses this for simulators it only knows through ``f`` and ``h``. For a
+    pybounds ``Simulator`` or a ``JaxSimulator`` it differentiates the simulator's own integrator step
+    instead (``linearization='flow'``, the default there), which has no frozen-``A`` error and matches the
+    bounds-* methods as ``Q -> 0``.
+
+    :param callable f: continuous-time dynamics, x_dot = f(x, u), or the discrete update map
     :param callable h: measurements, y = h(x, u)
     :param x_traj: (N, n) states along the trajectory
     :param u_traj: (N, m) inputs along the trajectory
-    :param float dt: sample time
+    :param float dt: sample time (unused for a discrete model)
     :param str backend: 'classic' (central finite differences) or 'jax' (forward-mode autodiff;
         f and h must use jax.numpy)
     :param float eps: finite-difference step ('classic' only)
+    :param bool discrete: f is a discrete-time update map
+    :param list aux_list: optional auxiliary data, one entry per sample; sample k calls ``f(x, u, aux_list[k])``
+        and ``h(x, u, aux_list[k])``
     :return: (Phi, C) of shapes (N, n, n) and (N, p, n)
     """
 
@@ -189,13 +223,107 @@ def linearize(f, h, x_traj, u_traj, dt, backend='classic', eps=1e-5):
     u_traj = np.asarray(u_traj, dtype=float).reshape(x_traj.shape[0], -1)
 
     if backend == 'jax':
-        A, C = _jacobians_jax(f, h, x_traj, u_traj)
+        A, C = _jacobians_jax(f, h, x_traj, u_traj, aux_list)
     elif backend == 'classic':
-        A, C = _jacobians_finite_difference(f, h, x_traj, u_traj, eps)
+        A, C = _jacobians_finite_difference(f, h, x_traj, u_traj, eps, aux_list)
     else:
         raise ValueError(f"unknown backend {backend!r}; use 'classic' or 'jax'")
 
-    Phi = np.stack([expm(A_k * dt) for A_k in A])
+    Phi = A if discrete else np.stack([expm(A_k * dt) for A_k in A])
+
+    return Phi, C
+
+
+def _linearize_casadi_simulator(simulator, x_traj, u_traj, linearization='flow', eps=1e-5):
+    """ (Phi, C) of a pybounds ``Simulator`` at every sample, from its CasADi model: exact derivatives.
+
+    The model is rebuilt symbolically from ``simulator.f`` the way the Simulator itself builds it (lists of
+    CasADi SX variables), so any f the Simulator accepts works, including one written with CasADi functions.
+
+    - discrete model: ``Phi_k = df/dx`` of the update map;
+    - continuous, ``'flow'``: ``Phi_k`` is the sensitivity of one sample of the simulator's own integrator
+      (``params_simulator``: integration_tool, abstol, reltol), the exact transition matrix of the step the
+      bounds-* methods simulate;
+    - continuous, ``'expm'``: ``Phi_k = expm(A_k dt)`` with the exact ``A_k = df/dx``.
+
+    ``C_k = dh/dx`` symbolically when h can be evaluated on CasADi symbols, else by central differences of
+    the numeric h with step ``eps`` (the Simulator only ever calls h numerically, so h need not be symbolic).
+    """
+
+    import casadi as ca
+
+    x_traj = np.asarray(x_traj, dtype=float)
+    N = x_traj.shape[0]
+    u_traj = np.asarray(u_traj, dtype=float).reshape(N, -1)
+    n, m = x_traj.shape[1], u_traj.shape[1]
+
+    X, U = ca.SX.sym('x', n), ca.SX.sym('u', m)
+    X_list, U_list = [X[i] for i in range(n)], [U[i] for i in range(m)]
+    rhs = ca.vertcat(*simulator.f(X_list, U_list))
+
+    if simulator.model.model_type == 'discrete':
+        transition = ca.jacobian(rhs, X)
+    elif linearization == 'flow':
+        params = getattr(simulator, 'params_simulator', None) or {}
+        options = {key: params[key] for key in ('abstol', 'reltol') if key in params}
+        step = ca.integrator('step', params.get('integration_tool', 'idas'), {'x': X, 'p': U, 'ode': rhs},
+                             0.0, float(simulator.dt), options)
+        transition = ca.jacobian(step(x0=X, p=U)['xf'], X)
+    else:
+        transition = ca.jacobian(rhs, X)
+
+    def evaluate(expression, rows):
+        """expression(x_k, u_k) for every sample: (N, rows, n)."""
+        values = np.array(ca.Function('J', [X, U], [expression]).map(N)(x_traj.T, u_traj.T))
+        return values.reshape(rows, N, n).transpose(1, 0, 2)
+
+    Phi = evaluate(transition, n)
+    if simulator.model.model_type != 'discrete' and linearization != 'flow':
+        Phi = np.stack([expm(A_k * simulator.dt) for A_k in Phi])
+
+    h = getattr(simulator.h, '__wrapped__', simulator.h)
+    try:
+        y = ca.vertcat(*h(X_list, U_list))
+        if not isinstance(y, (ca.SX, ca.MX)) or y.shape[0] == 0:
+            raise TypeError('h did not return CasADi expressions')
+        C = evaluate(ca.jacobian(y, X), y.shape[0])
+    except Exception:   # h is numeric-only (e.g. uses np.unwrap or Python branching): differentiate numerically
+        C = np.stack([_fd_jacobian(simulator.h, x_traj[k], u_traj[k], eps=eps) for k in range(N)])
+
+    return Phi, C
+
+
+def _linearize_jax_simulator(simulator, x_traj, u_traj, backend='jax', eps=1e-5, aux_list=None):
+    """ (Phi, C) of a ``JaxSimulator`` at every sample, from its own integrator step (``'flow'``).
+
+    ``Phi_k`` is the Jacobian of one sample of the simulator's integration (its integrator and ``substeps``),
+    by forward-mode autodiff (``backend='jax'``) or central differences (``'classic'``). ``C_k = dh/dx``.
+    """
+
+    jax, jnp, _x64, _ = _jax_modules()
+    x_traj = np.asarray(x_traj, dtype=float)
+    N = x_traj.shape[0]
+    u_traj = np.asarray(u_traj, dtype=float).reshape(N, -1)
+    step = simulator._step_jax
+
+    def h_vector(x, u, aux=None):
+        return jnp.ravel(jnp.asarray(simulator.h_jax(x, u) if aux is None else simulator.h_jax(x, u, aux)))
+
+    with _x64():
+        if backend == 'jax':
+            x_batch = jnp.asarray(x_traj, dtype=jnp.float64)
+            u_batch = jnp.asarray(u_traj, dtype=jnp.float64)
+            aux_batch = _stack_aux(aux_list)
+            in_axes = (0, 0, None if aux_batch is None else 0)
+            Phi = np.array(jax.jit(jax.vmap(jax.jacfwd(step, argnums=0), in_axes=in_axes))(x_batch, u_batch, aux_batch))
+            C = np.array(jax.jit(jax.vmap(jax.jacfwd(h_vector, argnums=0), in_axes=in_axes))(x_batch, u_batch, aux_batch))
+        else:
+            step_jit, h_jit = jax.jit(step), jax.jit(h_vector)
+            aux_list = [None] * N if aux_list is None else aux_list
+            Phi = np.stack([_fd_jacobian(lambda x, u, a=aux_list[k]: np.asarray(step_jit(x, u, a)),
+                                         x_traj[k], u_traj[k], eps=eps) for k in range(N)])
+            C = np.stack([_fd_jacobian(lambda x, u, a=aux_list[k]: np.asarray(h_jit(x, u, a)),
+                                       x_traj[k], u_traj[k], eps=eps) for k in range(N)])
 
     return Phi, C
 
@@ -482,7 +610,13 @@ def window_observability_matrix(Phi, C, k, w, bounded='initial', sensor_names=No
         for j in range(w - 1, -1, -1):
             maps[j] = Psi
             if j > 0:
-                Psi = np.linalg.inv(Phi[k + j - 1]) @ Psi
+                try:
+                    Psi = np.linalg.solve(Phi[k + j - 1], Psi)
+                except np.linalg.LinAlgError:
+                    raise ValueError(f'the transition matrix at sample {k + j - 1} is singular (possible for a '
+                                     'discrete-time model), so the constructability matrix, which maps the final '
+                                     'state back through it, does not exist; the constructability Gramian itself '
+                                     'does not need it') from None
     elif bounded == 'initial':
         # Psi[j] maps the window's initial state forward to sample k+j.
         for j in range(w):

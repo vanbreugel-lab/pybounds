@@ -233,10 +233,14 @@ class TestMethods:
             assert (ev.dropna().to_numpy() >= ev_bounds.dropna().to_numpy() * (1 - 1e-9)).all()
             assert not np.allclose(oa.fisher_information(), F_bounds)
 
-    def test_aux_list_unsupported(self, simulator, trajectory):
-        with pytest.raises(TypeError, match="does not accept: \\['aux_list'\\]"):
+    def test_aux_list_ignored_by_a_pybounds_simulator(self, simulator, trajectory, obs):
+        """aux_list is accepted; a pybounds Simulator ignores aux, as its simulate() (and so bounds-empirical) does."""
+        oa = ObservabilityAnalysis(simulator, *trajectory, method='stochastic-observability-classic', w=WINDOW_SIZE,
+                                   R=0.1, Q=1e-4, aux_list=[{'k': 1.0}] * N_STEPS_SLIDING).run()
+        np.testing.assert_array_equal(oa.fisher_information(), obs.fisher_information())
+        with pytest.raises(ValueError, match='aux_list must have same number of elements'):
             ObservabilityAnalysis(simulator, *trajectory, method='stochastic-observability-classic',
-                                  aux_list=[None] * N_STEPS_SLIDING)
+                                  aux_list=[None] * 3).run()
 
     def test_eps_is_classic_only(self, simulator, trajectory):
         ObservabilityAnalysis(simulator, *trajectory, method='stochastic-observability-classic', eps=1e-6)
@@ -353,8 +357,13 @@ class TestQueries:
             assert sidecar_Q['_names'] == list(Q.index)
 
     def test_R_errors(self, obs):
-        with pytest.raises(ValueError, match='a matrix R is not supported'):
-            obs.min_error_variance(R=np.eye(WINDOW_SIZE))
+        # a matrix R is supported as long as the noise is white in time (block-diagonal over time steps)
+        pd.testing.assert_frame_equal(obs.min_error_variance(R=0.1 * np.eye(WINDOW_SIZE)), obs.min_error_variance(),
+                                      check_exact=True)
+        correlated = 0.1 * np.eye(WINDOW_SIZE)
+        correlated[0, 1] = correlated[1, 0] = 0.01
+        with pytest.raises(ValueError, match='white in time'):
+            obs.min_error_variance(R=correlated)
         with pytest.raises(ValueError, match="no noise level for sensors \\['r'\\]"):
             obs.min_error_variance(R={'x': 1.0})
 
@@ -386,11 +395,13 @@ class TestQueries:
         assert any(key[-2] == 1e-3 for key in obs._cache)
         pd.testing.assert_frame_equal(obs.min_error_variance(Q=1e-3), first)
 
-    def test_fisher_needs_O(self, obs):
-        with pytest.raises(ValueError, match='fisher_information'):
-            obs.fisher()
-        with pytest.raises(ValueError, match='observability_matrix'):
-            obs.O_df_sliding
+    def test_fisher_and_O_df_sliding(self, obs):
+        sliding = obs.fisher()
+        pd.testing.assert_frame_equal(sliding.get_minimum_error_variance(), obs.min_error_variance(), check_exact=True)
+        np.testing.assert_array_equal(np.stack([w.F.to_numpy() for w in sliding.FO]), obs.fisher_information())
+        frames = obs.O_df_sliding
+        assert len(frames) == N_WINDOWS
+        pd.testing.assert_frame_equal(frames[3], obs.observability_matrix(3))
 
     @pytest.mark.parametrize('kind', ['obs', 'con'])
     def test_observability_matrix(self, kind, obs, con):
@@ -421,8 +432,11 @@ class TestQueries:
         assert sidecar['selection']['Q'] == 1e-4 and sidecar['selection']['alignment'] == 'bounded_state'
         assert 'final time-step' in sidecar['time_alignment']
         assert sidecar['analysis']['settings']['method'] == 'stochastic-constructability-classic'
-        with pytest.raises(ValueError, match='does not build'):
-            con.save_results(tmp_path / 'other', include_observability_matrices=True)
+        files = con.save_results(tmp_path / 'other', include_observability_matrices=True)
+        saved = np.load(files['observability_matrices'])
+        np.testing.assert_array_equal(saved['O'][2], con.observability_matrix(2).to_numpy())
+        np.testing.assert_array_equal(saved['Phi'], con.linearization.Phi)
+        assert str(saved['bounded']) == 'final' 
 
 
 class TestAlignment:

@@ -128,7 +128,20 @@ ev_more_noise = oa.min_error_variance(Q=1e-2)   # Q, R and lam can change withou
 
 - **Observability vs constructability:** stochastic *observability* (Eq. 33) is the Fisher information about the state at the **start** of each window, the same state the `bounds-*` methods describe. Stochastic *constructability* (Eq. 30) is about the state at the **end** of each window. Its inverse is the posterior Cramér-Rao bound, the quantity a Kalman filter's error covariance tracks.
 - **`Q`** is the per-step discrete process noise covariance. It can be a scalar, one variance per state (a dict, or a 1-D array in state order), or an (n, n) matrix (an array, or a DataFrame labelled by state name). It must be strictly positive. Give constant parameters a small `Q` rather than zero.
-- **Linearization:** the model is linearized along the trajectory (Φ = expm(A·dt)). `-classic` uses finite differences; `-jax` uses autodiff and needs `f` and `h` written with `jax.numpy`. Because of the linearization, results differ from the `bounds-*` methods by discretization error even as Q → 0. `pybounds.stochastic` also exposes the recursions directly, for linear time-varying systems.
+- **Linearization:** the model is linearized at every sample of the trajectory.
+  - By default (`linearization='flow'`), each step's transition matrix is the exact Jacobian of the simulator's own integrator step:
+    - the CasADi/IDAS step of a pybounds `Simulator`, with `-classic`;
+    - the RK4/Euler step of a `JaxSimulator` (including `substeps`);
+    - the update map of a discrete-time model (`Simulator(discrete=True)`).
+  - With Q → 0, the stochastic Gramians then reproduce the `bounds-*` methods, for the model's own trajectory.
+  - `linearization='expm'` uses Φ = expm(∂f/∂x·dt) instead. That is the duality letter's discretization, and the only option for a custom simulator known only through `f` and `h`.
+  - `-classic` uses exact CasADi derivatives for a pybounds `Simulator`, so `f` may use CasADi functions. Otherwise it uses finite differences.
+  - `-jax` uses autodiff and needs `f` and `h` written with `jax.numpy`.
+  - `pybounds.stochastic` also exposes the recursions directly, for linear time-varying systems.
+- **Also supported, as with the `bounds-*` methods:**
+  - `aux_list`: sample k is linearized with `aux_list[k]`.
+  - A matrix `R`: either (p, p), the same at every step, or (w·p, w·p) in the observability-matrix row order. The noise must be uncorrelated between time steps.
+  - `fisher()`, `O_df_sliding` (the equivalent noise-free matrices), and `save_results(include_observability_matrices=True)`.
 - **Validation:** [validation/stochastic_duality_fig2.ipynb](validation/stochastic_duality_fig2.ipynb) checks the recursions against the paper's MATLAB code and redraws its Fig. 2.
 - **Sweeping the window size:** the linearization does not depend on `w` or on the coordinate transform. Changing only `w`, `z_function` or `z_state_names` keeps it, and the next `run()` only re-derives the windows. Changing the method or its options linearizes again.
 - **Which states need a small `Q`:** `oa.deterministic_states()` lists the states whose row of Φ is exactly eᵢ at every sample, such as constant parameters and clocks. They have no process noise physically. `oa.model_state_names` gives the names `Q` is keyed by. These are the model's own names, even when a `z_function` renames the states.

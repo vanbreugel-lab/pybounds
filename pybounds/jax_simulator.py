@@ -123,8 +123,10 @@ class JaxSimulator:
         self.p = len(measurement_names)
         self.integrator = integrator
 
-        # Build the pure JAX simulation function once and store it.
+        # Build the pure JAX simulation function once and store it, and the one-sample state update it uses
+        # (the stochastic methods differentiate that update to get each step's transition matrix).
         self._simulate_jax = self._build_simulate()
+        self._step_jax = self._build_step()
 
     def _build_simulate(self):
         """Return a pure JAX function  simulate(x0, u_seq, aux=None) -> y_traj.
@@ -135,22 +137,9 @@ class JaxSimulator:
         y_traj: shape (w, p)  — measurement at every time step
         """
         substeps = self.substeps
-        dt = self.dt / substeps  # integration step
         f = self.f_jax
         h = self.h_jax
-        integrator = self.integrator
-
-        def euler_step(f_xu, x, u):
-            return x + dt * jnp.asarray(f_xu(x, u))
-
-        def rk4_step(f_xu, x, u):
-            k1 = jnp.asarray(f_xu(x,              u))
-            k2 = jnp.asarray(f_xu(x + dt / 2 * k1, u))
-            k3 = jnp.asarray(f_xu(x + dt / 2 * k2, u))
-            k4 = jnp.asarray(f_xu(x + dt * k3,      u))
-            return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-
-        step_fn = rk4_step if integrator == 'rk4' else euler_step
+        step_fn = _integrator_step(self.integrator, self.dt / substeps)
 
         def simulate(x0, u_seq, aux=None):
             """Integrate forward and return measurement trajectory.
@@ -182,6 +171,22 @@ class JaxSimulator:
             return y_traj   # shape (w, p)
 
         return simulate
+
+    def _build_step(self):
+        """Return a pure JAX function  step(x, u, aux=None) -> x_next: one sample of the integration in
+        ``simulate`` (all its substeps), with the same operations, so its Jacobian is the sample's transition
+        matrix for exactly this integrator."""
+        substeps = self.substeps
+        f = self.f_jax
+        step_fn = _integrator_step(self.integrator, self.dt / substeps)
+
+        def step(x, u, aux=None):
+            f_xu = f if aux is None else (lambda x_, u_: f(x_, u_, aux))
+            if substeps == 1:
+                return step_fn(f_xu, x, u)
+            return jax.lax.fori_loop(0, substeps, lambda _, x_k: step_fn(f_xu, x_k, u), x)
+
+        return step
 
     @_with_x64
     def simulate(self, x0, u_seq, aux=None):
@@ -585,6 +590,22 @@ def _warn_nonfinite(context):
         'produced invalid values. For coarse dt or stiff dynamics, increase JaxSimulator(substeps=...), '
         'reduce dt, or use the CasADi backend (IDAS).',
         RuntimeWarning, stacklevel=3)
+
+
+def _integrator_step(integrator, dt):
+    """One integration step of size dt for f_xu(x, u): 'rk4' or 'euler'."""
+
+    def euler_step(f_xu, x, u):
+        return x + dt * jnp.asarray(f_xu(x, u))
+
+    def rk4_step(f_xu, x, u):
+        k1 = jnp.asarray(f_xu(x,              u))
+        k2 = jnp.asarray(f_xu(x + dt / 2 * k1, u))
+        k3 = jnp.asarray(f_xu(x + dt / 2 * k2, u))
+        k4 = jnp.asarray(f_xu(x + dt * k3,      u))
+        return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+
+    return rk4_step if integrator == 'rk4' else euler_step
 
 
 def _to_aux(aux):
