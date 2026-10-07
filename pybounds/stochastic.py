@@ -94,7 +94,7 @@ from scipy.linalg import expm
 # Jacobians along the trajectory
 # ---------------------------------------------------------------------------------------------
 
-def fd_jacobian(func, x, u, eps):
+def _fd_jacobian(func, x, u, eps):
     """ Central-difference Jacobian of ``func(x, u)`` with respect to x.
 
     The step is ``eps``, absolute and identical for every state, exactly as the empirical method
@@ -121,8 +121,8 @@ def fd_jacobian(func, x, u, eps):
 def _jacobians_finite_difference(f, h, x_traj, u_traj, eps):
     """ (A, C) at every sample by central differences. Shapes (N, n, n) and (N, p, n). """
 
-    A = np.stack([fd_jacobian(f, x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
-    C = np.stack([fd_jacobian(h, x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
+    A = np.stack([_fd_jacobian(f, x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
+    C = np.stack([_fd_jacobian(h, x_traj[k], u_traj[k], eps=eps) for k in range(len(x_traj))])
 
     return A, C
 
@@ -163,7 +163,7 @@ def linearize(f, h, x_traj, u_traj, dt, backend='classic', eps=1e-5):
     """ Linearize a nonlinear model at every sample of a realized trajectory.
 
     Returns the per-step **discrete** transition matrices and measurement Jacobians of the letter's
-    Eq. (22), ``dx_{k+1} = Phi_k dx_k + w_k``, ``dy_k = C_k dx_k + v_k``:
+    Eq. (22), ``dx_{k+1} = Phi_k dx_k + w_k``, ``dy_k = C_k dx_k + v_k``::
 
         A_k = df/dx |(x_k, u_k),   Phi_k = expm(A_k * dt),   C_k = dh/dx |(x_k, u_k)
 
@@ -240,12 +240,12 @@ def process_covariance(q, state_names, overrides=None):
         diagonal[names.index(name)] = _positive_q(value, 'Q for %r' % (name,))
 
     if diagonal.max() / diagonal.min() > MAX_Q_SPREAD:
-        warnings.warn(q_spread_warning(diagonal, names), RuntimeWarning, stacklevel=2)
+        warnings.warn(_q_spread_warning(diagonal, names), RuntimeWarning, stacklevel=2)
 
     return np.diag(diagonal)
 
 
-def q_spread_warning(diagonal, names):
+def _q_spread_warning(diagonal, names):
     """ The message behind ``MAX_Q_SPREAD``.
 
     Driving one diagonal entry of Q towards zero while the others stay put hits the same

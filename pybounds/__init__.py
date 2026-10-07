@@ -9,11 +9,9 @@ from .observability import ObservabilityMatrixImage
 from .observability import transform_states
 from .observability import compute_observability
 
-from .analysis import ObservabilityAnalysis, Linearization
+from .analysis import ObservabilityAnalysis, Linearization, SlidingO
 
-from . import stochastic
-from .stochastic import (stochastic_observability_gramian, stochastic_constructability_gramian,
-                         deterministic_observability_gramian, process_covariance)
+from . import stochastic   # the stochastic recursions live in this namespace only (pybounds.stochastic.X)
 
 from .jacobian import SymbolicJacobian
 
@@ -36,11 +34,8 @@ __all__ = [
     'compute_observability',
     'ObservabilityAnalysis',
     'Linearization',
+    'SlidingO',
     'stochastic',
-    'stochastic_observability_gramian',
-    'stochastic_constructability_gramian',
-    'deterministic_observability_gramian',
-    'process_covariance',
     'SymbolicJacobian',
     'colorline',
     'plot_heatmap_log_timeseries',

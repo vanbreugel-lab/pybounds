@@ -688,7 +688,7 @@ class ObservabilityAnalysis:
         'bounds-jax': batch_size (default None: all windows in one call), to compute at most that many windows per
         batched call. Smaller batches lower JAX's peak memory but make run() slower, and can change results in
         the last bit; see JaxSlidingEmpiricalObservabilityMatrix. Set integrator/substeps on the JaxSimulator.
-        'stochastic-*-classic': eps (finite-difference step of the linearization, default 1e-5).
+        ``'stochastic-*-classic'``: eps (finite-difference step of the linearization, default 1e-5).
         The stochastic methods do not support aux_list
 
     Memory: after run() the observability matrices are held once, as one (n_windows, w*p, n) float
@@ -1664,7 +1664,7 @@ class ObservabilityAnalysis:
             except np.linalg.LinAlgError:
                 raise ValueError('Q must be strictly positive definite: both recursions form Q^-1') from None
             if np.linalg.cond(Q) > _stochastic.MAX_Q_SPREAD:
-                warnings.warn(_stochastic.q_spread_warning(np.linalg.eigvalsh(Q), [''] * n), RuntimeWarning,
+                warnings.warn(_stochastic._q_spread_warning(np.linalg.eigvalsh(Q), [''] * n), RuntimeWarning,
                               stacklevel=4)
             return Q
         try:
